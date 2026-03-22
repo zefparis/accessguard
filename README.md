@@ -13,7 +13,7 @@ Physical access control for sites, buildings, and restricted zones. Workers scan
 
 ## Features
 
-- **Enrollment** (6 steps): full biometric stack (based on the WorkGuard reference implementation)
+- **Enrollment** (6 steps): full biometric stack
   - Selfie → AWS Rekognition
   - Stroop Test
   - Neural Reflex
