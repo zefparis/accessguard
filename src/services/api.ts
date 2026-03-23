@@ -9,7 +9,7 @@ const headers = () => {
 
   return {
     'Content-Type': 'application/json',
-    'x-api-key': API_KEY,
+    'X-API-Key': API_KEY,
   }
 }
 
