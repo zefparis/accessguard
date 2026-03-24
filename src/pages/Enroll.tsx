@@ -218,7 +218,7 @@ export function Enroll() {
             </div>
             <div className="field">
               <label>Email (optional)</label>
-              <input value={form.email} onChange={field('email')} placeholder="john@company.com" type="email" />
+              <input value={form.email} onChange={field('email')} placeholder="your email (optional)" type="email" />
             </div>
             <button className="btn btn-primary" type="submit">
               Continue →
