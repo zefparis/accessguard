@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { StroopTest } from '../components/StroopTest'
@@ -10,6 +10,7 @@ import type { BehavioralController, BehavioralProfile } from '../hooks/useBehavi
 import { useAccessGuardStore } from '../store/accessguardStore'
 import { enrollWorker } from '../services/api'
 import { generateSessionKeypair, PQ_ALGORITHM, signProfile } from '../services/postQuantum'
+import { behavioralCollector, faceCollector } from '../signal-engine'
 import type { CognitiveBaseline } from '../types'
 
 type Step = 'identity' | 'selfie' | 'stroop' | 'reflex' | 'vocal' | 'reaction' | 'submitting' | 'success' | 'error'
@@ -104,6 +105,14 @@ export function Enroll() {
   const nav = useNavigate()
   const { setWorker, setSelfie, setCognitive } = useAccessGuardStore()
 
+  useEffect(() => {
+    behavioralCollector.start()
+
+    return () => {
+      behavioralCollector.stop()
+    }
+  }, [])
+
   const [step, setStep] = useState<Step>('identity')
   const [selfieB64, setSelfieB64] = useState('')
   const [cognitive, setCog] = useState<Partial<CognitiveBaseline>>({})
@@ -166,6 +175,7 @@ export function Enroll() {
   }, [form.company, form.firstName, form.lastName, form.siteZone])
 
   function handleSelfie(b64: string) {
+    faceCollector.capture(b64)
     setSelfieB64(b64)
     setTimeout(() => setStep('stroop'), 600)
   }

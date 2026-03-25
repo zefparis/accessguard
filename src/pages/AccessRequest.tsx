@@ -1,10 +1,11 @@
-import { memo, useCallback, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { QRScanner, type AccessQrPayload } from '../components/QRScanner'
 import { verifyWorker } from '../services/api'
 import { addAccessLogEntry } from '../services/accessLog'
 import { useAccessGuardStore } from '../store/accessguardStore'
+import { behavioralCollector, cognitiveCollector, faceCollector } from '../signal-engine'
 
 type Step = 'method' | 'qr' | 'manual' | 'selfie' | 'verifying' | 'result'
 
@@ -73,6 +74,14 @@ export function AccessRequest() {
   const nav = useNavigate()
   const { worker } = useAccessGuardStore()
 
+  useEffect(() => {
+    behavioralCollector.start()
+
+    return () => {
+      behavioralCollector.stop()
+    }
+  }, [])
+
   const [step, setStep] = useState<Step>('method')
   const [err, setErr] = useState('')
   const [selfieB64, setSelfieB64] = useState('')
@@ -134,14 +143,23 @@ export function AccessRequest() {
   }, [form.firstName, form.lastName, form.zone])
 
   async function onSelfie(b64: string) {
+    faceCollector.capture(b64)
     setSelfieB64(b64)
     setStep('verifying')
     setErr('')
+    const startedAt = performance.now()
 
     try {
       const res = await verifyWorker({ selfie_b64: b64, first_name: form.firstName, last_name: form.lastName })
       const similarity = Math.round(res.similarity)
       const granted = Boolean(res.verified)
+      const durationMs = Math.round(performance.now() - startedAt)
+
+      cognitiveCollector.record({
+        testId: 'access-request',
+        score: similarity,
+        durationMs,
+      })
 
       addAccessLogEntry({
         at: Date.now(),
