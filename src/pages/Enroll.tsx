@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { StroopTest } from '../components/StroopTest'
@@ -17,6 +17,88 @@ type Step = 'identity' | 'selfie' | 'stroop' | 'reflex' | 'vocal' | 'reaction' |
 const PROGRESS: Record<Step, number> = {
   identity:10, selfie:25, stroop:45, reflex:60, vocal:75, reaction:88, submitting:95, success:100, error:0
 }
+
+type IdentityFormState = {
+  firstName: string
+  lastName: string
+  employeeId: string
+  accessLevel: 'Visitor' | 'Staff' | 'Manager' | 'Security'
+  siteZone: string
+  company: string
+  email: string
+}
+
+type IdentityFormProps = {
+  form: IdentityFormState
+  onSubmit: (e: FormEvent) => void
+  onFirstNameChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onLastNameChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onEmployeeIdChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onAccessLevelChange: (e: ChangeEvent<HTMLSelectElement>) => void
+  onSiteZoneChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onCompanyChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onEmailChange: (e: ChangeEvent<HTMLInputElement>) => void
+}
+
+const IdentityForm = memo(function IdentityForm({
+  form,
+  onSubmit,
+  onFirstNameChange,
+  onLastNameChange,
+  onEmployeeIdChange,
+  onAccessLevelChange,
+  onSiteZoneChange,
+  onCompanyChange,
+  onEmailChange,
+}: IdentityFormProps) {
+  return (
+    <>
+      <div className="badge badge-cyan">Step 1 of 6 — Identity</div>
+      <h1 className="step-title">Access Registration</h1>
+      <p className="step-sub">Create your physical access profile for secure sites.</p>
+      <form onSubmit={onSubmit} style={{ width: '100%' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div className="field">
+            <label>First Name *</label>
+            <input value={form.firstName} onChange={onFirstNameChange} required placeholder="John" />
+          </div>
+          <div className="field">
+            <label>Last Name *</label>
+            <input value={form.lastName} onChange={onLastNameChange} required placeholder="Smith" />
+          </div>
+        </div>
+        <div className="field">
+          <label>Employee ID</label>
+          <input value={form.employeeId} onChange={onEmployeeIdChange} placeholder="EMP-001" />
+        </div>
+        <div className="field">
+          <label>Access Level *</label>
+          <select value={form.accessLevel} onChange={onAccessLevelChange} required>
+            <option value="Visitor">Visitor</option>
+            <option value="Staff">Staff</option>
+            <option value="Manager">Manager</option>
+            <option value="Security">Security</option>
+          </select>
+        </div>
+        <div className="field">
+          <label>Site / Zone *</label>
+          <input value={form.siteZone} onChange={onSiteZoneChange} required placeholder="Zone B — Restricted" />
+        </div>
+        <div className="field">
+          <label>Company *</label>
+          <input value={form.company} onChange={onCompanyChange} required placeholder="ACME Mining" />
+        </div>
+        <div className="field">
+          <label>Email (optional)</label>
+          <input value={form.email} onChange={onEmailChange} placeholder="your email (optional)" type="email" />
+        </div>
+        <button className="btn btn-primary" type="submit">
+          Continue →
+        </button>
+      </form>
+    </>
+  )
+})
 
 export function Enroll() {
   const nav = useNavigate()
@@ -39,7 +121,7 @@ export function Enroll() {
   const behavioralCaptured = useMemo(() => Boolean(behavioralProfile), [behavioralProfile])
   const pqCaptured = useMemo(() => Boolean(pqPublicKey && pqSignature), [pqPublicKey, pqSignature])
 
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<IdentityFormState>({
     firstName: '',
     lastName: '',
     employeeId: '',
@@ -49,16 +131,39 @@ export function Enroll() {
     email: '',
   })
 
-  function field(key: keyof typeof form) {
-    return (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
-      setForm(f => ({ ...f, [key]: e.target.value }))
-  }
+  const handleFirstNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, firstName: e.target.value }))
+  }, [])
 
-  async function handleIdentity(e: React.FormEvent) {
+  const handleLastNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, lastName: e.target.value }))
+  }, [])
+
+  const handleEmployeeIdChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, employeeId: e.target.value }))
+  }, [])
+
+  const handleAccessLevelChange = useCallback((e: ChangeEvent<HTMLSelectElement>) => {
+    setForm(f => ({ ...f, accessLevel: e.target.value as IdentityFormState['accessLevel'] }))
+  }, [])
+
+  const handleSiteZoneChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, siteZone: e.target.value }))
+  }, [])
+
+  const handleCompanyChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, company: e.target.value }))
+  }, [])
+
+  const handleEmailChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(f => ({ ...f, email: e.target.value }))
+  }, [])
+
+  const handleIdentity = useCallback((e: FormEvent) => {
     e.preventDefault()
     if (!form.firstName || !form.lastName || !form.company || !form.siteZone) return
     setStep('selfie')
-  }
+  }, [form.company, form.firstName, form.lastName, form.siteZone])
 
   function handleSelfie(b64: string) {
     setSelfieB64(b64)
@@ -171,7 +276,7 @@ export function Enroll() {
   }
 
   return (
-    <BehavioralCapture onController={onBehavioralController}>
+    <BehavioralCapture enabled={step !== 'identity'} onController={onBehavioralController}>
       <div className="page">
         <div className="logo" style={{ cursor: 'pointer' }} onClick={() => nav('/')}>← ACCESSGUARD</div>
 
@@ -180,51 +285,17 @@ export function Enroll() {
         </div>
 
         {step === 'identity' && (
-        <>
-          <div className="badge badge-cyan">Step 1 of 6 — Identity</div>
-          <h1 className="step-title">Access Registration</h1>
-          <p className="step-sub">Create your physical access profile for secure sites.</p>
-          <form onSubmit={handleIdentity} style={{ width: '100%' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div className="field">
-                <label>First Name *</label>
-                <input value={form.firstName} onChange={field('firstName')} required placeholder="John" />
-              </div>
-              <div className="field">
-                <label>Last Name *</label>
-                <input value={form.lastName} onChange={field('lastName')} required placeholder="Smith" />
-              </div>
-            </div>
-            <div className="field">
-              <label>Employee ID</label>
-              <input value={form.employeeId} onChange={field('employeeId')} placeholder="EMP-001" />
-            </div>
-            <div className="field">
-              <label>Access Level *</label>
-              <select value={form.accessLevel} onChange={field('accessLevel')} required>
-                <option value="Visitor">Visitor</option>
-                <option value="Staff">Staff</option>
-                <option value="Manager">Manager</option>
-                <option value="Security">Security</option>
-              </select>
-            </div>
-            <div className="field">
-              <label>Site / Zone *</label>
-              <input value={form.siteZone} onChange={field('siteZone')} required placeholder="Zone B — Restricted" />
-            </div>
-            <div className="field">
-              <label>Company *</label>
-              <input value={form.company} onChange={field('company')} required placeholder="ACME Mining" />
-            </div>
-            <div className="field">
-              <label>Email (optional)</label>
-              <input value={form.email} onChange={field('email')} placeholder="your email (optional)" type="email" />
-            </div>
-            <button className="btn btn-primary" type="submit">
-              Continue →
-            </button>
-          </form>
-        </>
+          <IdentityForm
+            form={form}
+            onSubmit={handleIdentity}
+            onFirstNameChange={handleFirstNameChange}
+            onLastNameChange={handleLastNameChange}
+            onEmployeeIdChange={handleEmployeeIdChange}
+            onAccessLevelChange={handleAccessLevelChange}
+            onSiteZoneChange={handleSiteZoneChange}
+            onCompanyChange={handleCompanyChange}
+            onEmailChange={handleEmailChange}
+          />
         )}
 
         {step === 'selfie' && (

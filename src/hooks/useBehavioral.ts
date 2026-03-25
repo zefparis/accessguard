@@ -187,6 +187,11 @@ export function useBehavioral(): BehavioralController {
 
   const cleanupRef = useRef<(() => void) | null>(null)
 
+  const isTextInputFocused = useCallback((): boolean => {
+    const active = document.activeElement
+    return active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA'
+  }, [])
+
   const stop = useCallback((): BehavioralProfile => {
     if (stoppedProfileRef.current) return stoppedProfileRef.current
 
@@ -319,6 +324,8 @@ export function useBehavioral(): BehavioralController {
       t.active.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), path: 0 })
     }
     const onPointerMove = (e: PointerEvent) => {
+      if (isTextInputFocused()) return
+
       const t = touchRef.current
       t.pointerMove += 1
       const cur = t.active.get(e.pointerId)
@@ -381,7 +388,7 @@ export function useBehavioral(): BehavioralController {
       window.removeEventListener('pointerup', onPointerUpOrCancel)
       window.removeEventListener('pointercancel', onPointerUpOrCancel)
     }
-  }, [isCapturing])
+  }, [isCapturing, isTextInputFocused])
 
   return useMemo(() => ({ start, stop, isCapturing }), [isCapturing, start, stop])
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { QRScanner, type AccessQrPayload } from '../components/QRScanner'
@@ -15,6 +15,59 @@ type AccessForm = {
   zone: string
   access_point: string
 }
+
+type ManualEntryFormProps = {
+  err: string
+  form: AccessForm
+  onSubmit: (e: FormEvent) => void
+  onFirstNameChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onLastNameChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onZoneChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onAccessPointChange: (e: ChangeEvent<HTMLInputElement>) => void
+  onBack: () => void
+}
+
+const ManualEntryForm = memo(function ManualEntryForm({
+  err,
+  form,
+  onSubmit,
+  onFirstNameChange,
+  onLastNameChange,
+  onZoneChange,
+  onAccessPointChange,
+  onBack,
+}: ManualEntryFormProps) {
+  return (
+    <>
+      <div className="badge badge-cyan">Step 1 — Manual</div>
+      <h1 className="step-title">Manual Entry</h1>
+      <p className="step-sub">Enter name and site/zone.</p>
+      <form onSubmit={onSubmit} style={{ width: '100%' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div className="field">
+            <label>First Name</label>
+            <input value={form.firstName} onChange={onFirstNameChange} required placeholder="John" />
+          </div>
+          <div className="field">
+            <label>Last Name</label>
+            <input value={form.lastName} onChange={onLastNameChange} required placeholder="Smith" />
+          </div>
+        </div>
+        <div className="field">
+          <label>Site / Zone</label>
+          <input value={form.zone} onChange={onZoneChange} required placeholder="Zone B — Restricted" />
+        </div>
+        <div className="field">
+          <label>Access point (optional)</label>
+          <input value={form.access_point} onChange={onAccessPointChange} placeholder="Gate 3" />
+        </div>
+        {err && <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <button className="btn btn-primary" type="submit">Continue →</button>
+      </form>
+      <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={onBack}>Back</button>
+    </>
+  )
+})
 
 export function AccessRequest() {
   const nav = useNavigate()
@@ -34,9 +87,21 @@ export function AccessRequest() {
 
   const accessLevel = worker?.jobRole || '—'
 
-  function setField(key: keyof AccessForm) {
-    return (e: React.ChangeEvent<HTMLInputElement>) => setForm(v => ({ ...v, [key]: e.target.value }))
-  }
+  const handleFirstNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(v => ({ ...v, firstName: e.target.value }))
+  }, [])
+
+  const handleLastNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(v => ({ ...v, lastName: e.target.value }))
+  }, [])
+
+  const handleZoneChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(v => ({ ...v, zone: e.target.value }))
+  }, [])
+
+  const handleAccessPointChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+    setForm(v => ({ ...v, access_point: e.target.value }))
+  }, [])
 
   const zoneLabel = useMemo(() => {
     if (!form.site && !form.zone) return '—'
@@ -54,7 +119,7 @@ export function AccessRequest() {
     setStep('selfie')
   }
 
-  function beginManual(e: React.FormEvent) {
+  const beginManual = useCallback((e: FormEvent) => {
     e.preventDefault()
     setErr('')
     if (!form.firstName || !form.lastName) {
@@ -66,7 +131,7 @@ export function AccessRequest() {
       return
     }
     setStep('selfie')
-  }
+  }, [form.firstName, form.lastName, form.zone])
 
   async function onSelfie(b64: string) {
     setSelfieB64(b64)
@@ -131,34 +196,16 @@ export function AccessRequest() {
       )}
 
       {step === 'manual' && (
-        <>
-          <div className="badge badge-cyan">Step 1 — Manual</div>
-          <h1 className="step-title">Manual Entry</h1>
-          <p className="step-sub">Enter name and site/zone.</p>
-          <form onSubmit={beginManual} style={{ width: '100%' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div className="field">
-                <label>First Name</label>
-                <input value={form.firstName} onChange={setField('firstName')} required placeholder="John" />
-              </div>
-              <div className="field">
-                <label>Last Name</label>
-                <input value={form.lastName} onChange={setField('lastName')} required placeholder="Smith" />
-              </div>
-            </div>
-            <div className="field">
-              <label>Site / Zone</label>
-              <input value={form.zone} onChange={setField('zone')} required placeholder="Zone B — Restricted" />
-            </div>
-            <div className="field">
-              <label>Access point (optional)</label>
-              <input value={form.access_point} onChange={setField('access_point')} placeholder="Gate 3" />
-            </div>
-            {err && <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 10 }}>{err}</div>}
-            <button className="btn btn-primary" type="submit">Continue →</button>
-          </form>
-          <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={() => setStep('method')}>Back</button>
-        </>
+        <ManualEntryForm
+          err={err}
+          form={form}
+          onSubmit={beginManual}
+          onFirstNameChange={handleFirstNameChange}
+          onLastNameChange={handleLastNameChange}
+          onZoneChange={handleZoneChange}
+          onAccessPointChange={handleAccessPointChange}
+          onBack={() => setStep('method')}
+        />
       )}
 
       {step === 'selfie' && (
