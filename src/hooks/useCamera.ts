@@ -5,11 +5,13 @@ export function useCamera() {
   const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const [isInitializing, setIsInitializing] = useState(true)
 
   useEffect(() => {
     let active = true
     async function start() {
       try {
+        setIsInitializing(true)
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
         })
@@ -19,11 +21,18 @@ export function useCamera() {
           videoRef.current.srcObject = stream
           videoRef.current.onloadedmetadata = () => {
             videoRef.current?.play()
-            setReady(true)
+            // Wait for 2 seconds of loading sequence before marking as ready
+            setTimeout(() => {
+              if (active) {
+                setReady(true)
+                setIsInitializing(false)
+              }
+            }, 2000)
           }
         }
       } catch {
         setError('Camera access denied. Please allow camera in browser settings.')
+        setIsInitializing(false)
       }
     }
     start()
@@ -43,5 +52,5 @@ export function useCamera() {
     return canvas.toDataURL('image/jpeg', 0.92)
   }, [ready])
 
-  return { videoRef, ready, error, capture }
+  return { videoRef, ready, error, capture, isInitializing }
 }

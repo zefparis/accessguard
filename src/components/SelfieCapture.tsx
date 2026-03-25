@@ -1,4 +1,5 @@
 import { useCamera } from '../hooks/useCamera'
+import { CameraInitLoader } from './CameraInitLoader'
 import { useState } from 'react'
 
 interface Props {
@@ -7,7 +8,7 @@ interface Props {
 }
 
 export function SelfieCapture({ onCapture, loading }: Props) {
-  const { videoRef, ready, error, capture } = useCamera()
+  const { videoRef, ready, error, capture, isInitializing } = useCamera()
   const [captured, setCaptured] = useState<string | null>(null)
 
   function handleCapture() {
@@ -23,6 +24,7 @@ export function SelfieCapture({ onCapture, loading }: Props) {
 
   return (
     <div style={{ width: '100%' }}>
+      <CameraInitLoader isLoading={isInitializing} />
       <div style={{
         position: 'relative', width: '100%', maxWidth: 340, margin: '0 auto 20px',
         borderRadius: 12, overflow: 'hidden',
