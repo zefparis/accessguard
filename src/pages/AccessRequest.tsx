@@ -5,7 +5,7 @@ import { QRScanner, type AccessQrPayload } from '../components/QRScanner'
 import { verifyWorker } from '../services/api'
 import { addAccessLogEntry } from '../services/accessLog'
 import { useAccessGuardStore } from '../store/accessguardStore'
-import { behavioralCollector, cognitiveCollector, faceCollector } from '../signal-engine'
+import { behavioralCollector, cognitiveCollector, faceCollector, signalBus } from '../signal-engine'
 
 type Step = 'method' | 'qr' | 'manual' | 'selfie' | 'verifying' | 'result'
 
@@ -85,6 +85,18 @@ export function AccessRequest() {
   const [step, setStep] = useState<Step>('method')
   const [err, setErr] = useState('')
   const [selfieB64, setSelfieB64] = useState('')
+
+  useEffect(() => {
+    if (step === 'selfie') {
+      signalBus.pause()
+
+      return () => {
+        signalBus.resume()
+      }
+    }
+
+    signalBus.resume()
+  }, [step])
 
   const [form, setForm] = useState<AccessForm>({
     firstName: worker?.firstName ?? '',

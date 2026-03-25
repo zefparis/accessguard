@@ -10,7 +10,7 @@ import type { BehavioralController, BehavioralProfile } from '../hooks/useBehavi
 import { useAccessGuardStore } from '../store/accessguardStore'
 import { enrollWorker } from '../services/api'
 import { generateSessionKeypair, PQ_ALGORITHM, signProfile } from '../services/postQuantum'
-import { behavioralCollector, faceCollector } from '../signal-engine'
+import { behavioralCollector, faceCollector, signalBus } from '../signal-engine'
 import type { CognitiveBaseline } from '../types'
 
 type Step = 'identity' | 'selfie' | 'stroop' | 'reflex' | 'vocal' | 'reaction' | 'submitting' | 'success' | 'error'
@@ -119,6 +119,18 @@ export function Enroll() {
   const [errorMsg, setErrorMsg] = useState('')
   const [workerId, setWorkerId] = useState('')
   const [confidence, setConf] = useState(0)
+
+  useEffect(() => {
+    if (step === 'selfie') {
+      signalBus.pause()
+
+      return () => {
+        signalBus.resume()
+      }
+    }
+
+    signalBus.resume()
+  }, [step])
 
   const behavioralCtrlRef = useRef<BehavioralController | null>(null)
   const [behavioralProfile, setBehavioralProfile] = useState<BehavioralProfile | null>(null)

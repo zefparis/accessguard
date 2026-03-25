@@ -1,6 +1,8 @@
 import { signalBus } from './SignalBus'
 
 class BehavioralCollector {
+  private lastTouch = 0
+
   private readonly handleMouseMove = (event: MouseEvent) => {
     signalBus.emit('behavioral', {
       type: 'mousemove',
@@ -10,22 +12,26 @@ class BehavioralCollector {
     })
   }
 
-  private readonly handleKeyDown = (event: KeyboardEvent) => {
+  private readonly handleKeyDown = () => {
     signalBus.emit('behavioral', {
       type: 'keydown',
       timestamp: Date.now(),
-      key: event.key,
     })
   }
 
   private readonly handleTouchMove = (event: TouchEvent) => {
-    const touch = event.touches[0]
+    const now = Date.now()
+    if (now - this.lastTouch < 150) {
+      return
+    }
+
+    this.lastTouch = now
 
     signalBus.emit('behavioral', {
       type: 'touchmove',
-      timestamp: Date.now(),
-      x: touch?.clientX,
-      y: touch?.clientY,
+      timestamp: now,
+      x: event.touches[0]?.clientX,
+      y: event.touches[0]?.clientY,
     })
   }
 
