@@ -21,6 +21,9 @@ export async function enrollWorker(payload: {
   tenant_id: string
   cognitive_baseline?: {
     stroop_score?: number
+    stroop_accuracy?: number
+    reflex_avg_ms?: number
+    reflex_scores?: number[]
     reflex_velocity_ms?: number
     vocal_accuracy?: number
     vocal_embedding?: number[]

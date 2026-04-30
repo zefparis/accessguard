@@ -11,16 +11,16 @@ import { generateSessionKeypair, PQ_ALGORITHM, signProfile } from '../services/p
 import { behavioralCollector, faceCollector, signalBus } from '../signal-engine'
 import type { CognitiveBaseline } from '../types'
 
-type Step = 'identity' | 'selfie' | 'stroop' | 'vocal' | 'submitting' | 'success' | 'error'
+type Step = 'identity' | 'selfie' | 'stroop' | 'vocal' | 'reflex' | 'submitting' | 'success' | 'error'
 
-type VocalPhase = 'idle' | 'countdown' | 'recording' | 'processing' | 'done'
+type VocalPhase = 'idle' | 'recording' | 'processing' | 'done'
 
 const PROGRESS: Record<Step, number> = {
-  identity:10, selfie:30, stroop:50, vocal:75, submitting:95, success:100, error:0
+  identity:10, selfie:25, stroop:40, vocal:60, reflex:80, submitting:95, success:100, error:0
 }
 
 const VOCAL_RECORD_MS = 3000
-const VOCAL_COUNTDOWN_SEC = 3
+const REFLEX_ROUNDS = 5
 
 type IdentityFormState = {
   firstName: string
@@ -57,7 +57,7 @@ const IdentityForm = memo(function IdentityForm({
 }: IdentityFormProps) {
   return (
     <>
-      <div className="badge badge-cyan">Step 1 of 4 — Identity</div>
+      <div className="badge badge-cyan">Step 1 of 5 — Identity</div>
       <h1 className="step-title">Access Registration</h1>
       <p className="step-sub">Create your physical access profile for secure sites.</p>
       <form onSubmit={onSubmit} style={{ width: '100%' }}>
@@ -125,7 +125,13 @@ export function Enroll() {
 
   const voice = useVoiceBiometrics()
   const [vocalPhase, setVocalPhase] = useState<VocalPhase>('idle')
-  const [vocalCountdown, setVocalCountdown] = useState(VOCAL_COUNTDOWN_SEC)
+
+  // Reflex state
+  const [reflexRound, setReflexRound] = useState(0)
+  const [reflexState, setReflexState] = useState<'wait' | 'ready' | 'go'>('wait')
+  const [reflexTimes, setReflexTimes] = useState<number[]>([])
+  const [reflexT0, setReflexT0] = useState(0)
+  const [reflexFeedback, setReflexFeedback] = useState<string | null>(null)
 
   useEffect(() => {
     if (step === 'selfie') {
@@ -204,15 +210,7 @@ export function Enroll() {
     setStep('vocal')
   }
 
-  async function handleVocal() {
-    setVocalPhase('countdown')
-    setVocalCountdown(VOCAL_COUNTDOWN_SEC)
-
-    for (let i = VOCAL_COUNTDOWN_SEC; i >= 1; i--) {
-      setVocalCountdown(i)
-      await new Promise(r => setTimeout(r, 1000))
-    }
-
+  async function handleVocalStart() {
     setVocalPhase('recording')
     let samples: Float32Array
     try {
@@ -221,14 +219,14 @@ export function Enroll() {
       console.error('[vocal] recordAudio failed', e)
       setCog(c => ({ ...c, vocalAccuracy: 0, vocalQuality: 0 }))
       setVocalPhase('idle')
-      submitEnrollment()
+      setStep('reflex')
       return
     }
 
     if (!samples || samples.length === 0) {
       setCog(c => ({ ...c, vocalAccuracy: 0, vocalQuality: 0 }))
       setVocalPhase('idle')
-      submitEnrollment()
+      setStep('reflex')
       return
     }
 
@@ -256,48 +254,83 @@ export function Enroll() {
     setVocalPhase('done')
     await new Promise(r => setTimeout(r, 800))
     setVocalPhase('idle')
-    submitEnrollment()
+    setStep('reflex')
+  }
+
+  // ── Reflex handlers ──
+  useEffect(() => {
+    if (step !== 'reflex' || reflexState !== 'ready') return
+    const delay = 800 + Math.random() * 1200
+    const timer = setTimeout(() => { setReflexState('go'); setReflexT0(Date.now()) }, delay)
+    return () => clearTimeout(timer)
+  }, [step, reflexState, reflexRound])
+
+  function handleReflexTap() {
+    if (reflexState === 'wait') { setReflexState('ready'); return }
+    if (reflexState === 'ready') {
+      setReflexFeedback('Too early!')
+      setTimeout(() => setReflexFeedback(null), 600)
+      return
+    }
+    if (reflexState === 'go') {
+      const ms = Date.now() - reflexT0
+      const next = [...reflexTimes, ms]
+      setReflexTimes(next)
+      setReflexFeedback(`${ms}ms`)
+      setTimeout(() => {
+        setReflexFeedback(null)
+        if (reflexRound + 1 >= REFLEX_ROUNDS) {
+          const avg = Math.round(next.reduce((a, b) => a + b, 0) / next.length)
+          setCog(c => ({ ...c, reflexAvgMs: avg, reflexScores: next, reflexVelocityMs: avg }))
+          submitEnrollment(next)
+        } else {
+          setReflexRound(r => r + 1)
+          setReflexState('ready')
+        }
+      }, 500)
+    }
   }
 
   const onBehavioralController = useCallback((controller: BehavioralController) => {
     behavioralCtrlRef.current = controller
   }, [])
 
-  async function submitEnrollment() {
+  async function submitEnrollment(scores?: number[]) {
+    const reflexScoresArr = scores ?? reflexTimes
+    const reflexAvg = reflexScoresArr.length
+      ? Math.round(reflexScoresArr.reduce((a, b) => a + b, 0) / reflexScoresArr.length)
+      : 0
+
     const final: CognitiveBaseline = {
       stroopScore: cognitive.stroopScore ?? 0,
-      reflexVelocityMs: 0,
+      stroopAccuracy: cognitive.stroopScore ? (cognitive.stroopScore / 100) : 0,
+      reflexVelocityMs: reflexAvg,
+      reflexAvgMs: reflexAvg,
+      reflexScores: reflexScoresArr,
       vocalAccuracy: cognitive.vocalAccuracy ?? 0,
       vocalEmbedding: cognitive.vocalEmbedding,
       vocalQuality: cognitive.vocalQuality,
       vocalSimilarityThreshold: cognitive.vocalSimilarityThreshold ?? 0.75,
-      reactionTimeMs: 0,
+      reactionTimeMs: reflexAvg,
     }
     setCog(final)
     setStep('submitting')
 
     try {
-      // Stop behavioral capture and finalize profile right before submit
       const behavioral = behavioralCtrlRef.current?.stop()
       if (behavioral) setBehavioralProfile(behavioral)
 
       const cognitiveBaseline = {
         stroop_score: final.stroopScore / 100,
+        stroop_accuracy: final.stroopAccuracy,
+        reflex_avg_ms: final.reflexAvgMs,
+        reflex_scores: final.reflexScores,
         reflex_velocity_ms: final.reflexVelocityMs,
         vocal_accuracy: final.vocalAccuracy / 100,
         reaction_time_ms: final.reactionTimeMs,
-        // New voice biometrics payload (stored in Supabase)
-        // -- ALTER TABLE edguard_enrollments
-        // -- ADD COLUMN IF NOT EXISTS vocal_embedding JSONB;
-        // -- ADD COLUMN IF NOT EXISTS vocal_quality FLOAT;
         vocal_embedding: final.vocalEmbedding,
         vocal_quality: final.vocalQuality,
         vocal_similarity_threshold: final.vocalSimilarityThreshold,
-        // New behavioral + post-quantum layers
-        // -- ALTER TABLE edguard_enrollments
-        // -- ADD COLUMN IF NOT EXISTS behavioral_profile JSONB;
-        // -- ADD COLUMN IF NOT EXISTS pq_public_key TEXT;
-        // -- ADD COLUMN IF NOT EXISTS pq_signature TEXT;
         behavioral,
       }
 
@@ -367,7 +400,7 @@ export function Enroll() {
 
         {step === 'selfie' && (
         <>
-          <div className="badge badge-cyan">Step 2 of 4 — Biometric</div>
+          <div className="badge badge-cyan">Step 2 of 5 — Biometric</div>
           <h1 className="step-title">Face Registration</h1>
           <p className="step-sub">Look directly at the camera. Ensure good lighting.</p>
           <SelfieCapture onCapture={handleSelfie} />
@@ -376,7 +409,7 @@ export function Enroll() {
 
         {step === 'stroop' && (
         <>
-          <div className="badge badge-amber">Step 3 of 4 — Cognitive</div>
+          <div className="badge badge-amber">Step 3 of 5 — Cognitive</div>
           <h1 className="step-title">Stroop Test</h1>
           <StroopTest onComplete={handleStroop} />
         </>
@@ -384,7 +417,7 @@ export function Enroll() {
 
         {step === 'vocal' && (
         <>
-          <div className="badge badge-amber">Step 4 of 4 — Voice sample</div>
+          <div className="badge badge-amber">Step 4 of 5 — Voice sample</div>
           <h1 className="step-title">Vocal Imprint</h1>
           <p className="step-sub">
             Read this sentence aloud when recording starts:
@@ -393,63 +426,62 @@ export function Enroll() {
           </p>
 
           {vocalPhase === 'idle' && (
-            <button className="btn btn-primary" type="button" onClick={handleVocal}>
-              Start voice sample →
+            <button className="btn btn-primary" type="button" onClick={handleVocalStart}>
+              Start Recording
             </button>
           )}
 
-          {vocalPhase === 'countdown' && (
-            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
-              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
-                Get ready...
-              </p>
-              <p style={{ fontSize: 56, fontWeight: 800, color: 'var(--cyan, #06b6d4)', lineHeight: 1 }}>
-                {vocalCountdown}
-              </p>
-            </div>
-          )}
-
           {vocalPhase === 'recording' && (
-            <div className="card" style={{ textAlign: 'center', padding: '20px 12px' }}>
-              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
-                Recording...
+            <div className="card" style={{ textAlign: 'center', padding: '24px 12px' }}>
+              <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--cyan, #06b6d4)' }}>
+                Recording... (3s)
               </p>
-              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--cyan, #06b6d4)' }}>
-                {(voice.countdownMs / 1000).toFixed(1)}s
-              </p>
-              {voice.waveform && (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, height: 40, marginTop: 12 }}>
-                  {Array.from({ length: 24 }, (_, i) => {
-                    const idx = Math.floor((i / 24) * voice.waveform!.length)
-                    const v = Math.abs((voice.waveform![idx] - 128) / 128)
-                    return (
-                      <div key={i} style={{
-                        width: 3, borderRadius: 2, transition: 'height 0.08s',
-                        height: Math.max(4, v * 36),
-                        background: 'var(--cyan, #06b6d4)', opacity: 0.7 + v * 0.3,
-                      }} />
-                    )
-                  })}
-                </div>
-              )}
             </div>
           )}
 
           {vocalPhase === 'processing' && (
-            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
-              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+            <div className="card" style={{ textAlign: 'center', padding: '24px 12px' }}>
+              <p style={{ fontSize: 16, fontWeight: 600, color: 'var(--grey)' }}>
                 Processing...
               </p>
-              <div style={{ fontSize: 28, color: 'var(--cyan, #06b6d4)' }}>⬡</div>
             </div>
           )}
 
           {vocalPhase === 'done' && (
-            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
-              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--green, #22c55e)' }}>
+            <div className="card" style={{ textAlign: 'center', padding: '24px 12px' }}>
+              <p style={{ fontSize: 20, fontWeight: 800, color: 'var(--green, #22c55e)' }}>
                 Done ✓
               </p>
             </div>
+          )}
+        </>
+        )}
+
+        {step === 'reflex' && (
+        <>
+          <div className="badge badge-amber">Step 5 of 5 — Reflex</div>
+          <h1 className="step-title">Reflex Test</h1>
+          <p className="step-sub">
+            Tap immediately when the button turns <b style={{ color: 'var(--green, #22c55e)' }}>GREEN</b>.
+            {' '}{Math.min(reflexRound + 1, REFLEX_ROUNDS)}/{REFLEX_ROUNDS}
+          </p>
+          <button
+            onClick={handleReflexTap}
+            style={{
+              width: '100%', height: 140, borderRadius: 16,
+              background: reflexState === 'go' ? 'var(--green, #22c55e)' : 'var(--bg3, #1a2236)',
+              border: `2px solid ${reflexState === 'go' ? 'var(--green, #22c55e)' : 'var(--border, #333)'}`,
+              color: reflexState === 'go' ? '#fff' : 'var(--grey)',
+              fontSize: reflexFeedback ? 32 : 18, fontWeight: 800,
+              cursor: 'pointer', transition: 'all 0.1s', letterSpacing: 2,
+            }}
+          >
+            {reflexFeedback || (reflexState === 'go' ? 'TAP NOW!' : reflexState === 'ready' ? 'WAIT...' : 'TAP TO START')}
+          </button>
+          {reflexTimes.length > 0 && (
+            <p style={{ marginTop: 14, fontSize: 13, color: 'var(--grey)' }}>
+              Avg: {Math.round(reflexTimes.reduce((a, b) => a + b, 0) / reflexTimes.length)}ms
+            </p>
           )}
         </>
         )}
@@ -504,6 +536,14 @@ export function Enroll() {
             <div className="metric-row">
               <span className="metric-label">Stroop score</span>
               <span className="metric-value">{cognitive.stroopScore}%</span>
+            </div>
+            <div className="metric-row">
+              <span className="metric-label">Reflex avg</span>
+              <span className="metric-value">{cognitive.reflexAvgMs ?? 0}ms</span>
+            </div>
+            <div className="metric-row">
+              <span className="metric-label">Vocal quality</span>
+              <span className="metric-value">{cognitive.vocalQuality != null ? Math.round(cognitive.vocalQuality * 100) : 0}%</span>
             </div>
             <div className="metric-row">
               <span className="metric-label">Behavioral profile</span>
