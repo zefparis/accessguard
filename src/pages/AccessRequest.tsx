@@ -20,6 +20,7 @@ import {
 const MAX_ATTEMPTS = 3
 const VOCAL_RECORD_MS = 3000
 const VOCAL_COUNTDOWN_SEC = 3
+const REFLEX_ROUNDS = 3
 
 type Step =
   | 'method'
@@ -28,6 +29,7 @@ type Step =
   | 'not-enrolled'
   | 'selfie'
   | 'vocal'
+  | 'reflex'
   | 'computing'
   | 'decision'
 
@@ -163,7 +165,7 @@ export function AccessRequest() {
   const [step, setStep] = useState<Step>('method')
   const [err, setErr] = useState('')
   const [studentId, setStudentId] = useState<string | null>(null)
-  const [vocalQuality, setVocalQuality] = useState<number | null>(null)
+  const [_vocalQuality, setVocalQuality] = useState<number | null>(null)
   const [vocalError, setVocalError] = useState('')
   const [vocalPhase, setVocalPhase] = useState<VocalPhase>('idle')
   const [vocalCountdown, setVocalCountdown] = useState(VOCAL_COUNTDOWN_SEC)
@@ -174,6 +176,14 @@ export function AccessRequest() {
   const voice = useVoiceBiometrics()
   const behavioral = useBehavioral()
   const vocalEmbeddingRef = useRef<Float32Array | null>(null)
+  const vocalQualityRef = useRef(0)
+
+  // Reflex state
+  const [reflexRound, setReflexRound] = useState(0)
+  const [reflexState, setReflexState] = useState<'wait' | 'ready' | 'go'>('wait')
+  const [reflexTimes, setReflexTimes] = useState<number[]>([])
+  const [reflexT0, setReflexT0] = useState(0)
+  const [reflexFeedback, setReflexFeedback] = useState<string | null>(null)
 
   useEffect(() => {
     return () => {
@@ -305,8 +315,9 @@ export function AccessRequest() {
       console.error('[vocal] recordAudio failed', errMsg)
       setVocalError(errMsg)
       setVocalQuality(0)
+      vocalQualityRef.current = 0
       setVocalPhase('idle')
-      submitDecision()
+      setStep('reflex')
       return
     }
 
@@ -314,8 +325,9 @@ export function AccessRequest() {
       console.error('[vocal] recordAudio returned empty buffer')
       setVocalError('Microphone returned empty audio')
       setVocalQuality(0)
+      vocalQualityRef.current = 0
       setVocalPhase('idle')
-      submitDecision()
+      setStep('reflex')
       return
     }
 
@@ -331,20 +343,22 @@ export function AccessRequest() {
       })
       const score = Math.max(0, Math.min(1, resp.vocal_score))
       setVocalQuality(score)
+      vocalQualityRef.current = score
       console.log('[vocal] verify result', { score, reason: resp.reason, samples: samples.length })
     } catch (verifyErr) {
       const errMsg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr)
       console.warn('[vocal-verify] failed', errMsg)
       setVocalQuality(0)
+      vocalQualityRef.current = 0
     }
 
     setVocalPhase('done')
     await new Promise(r => setTimeout(r, 800))
     setVocalPhase('idle')
-    submitDecision()
+    setStep('reflex')
   }, [voice, form.firstName, form.lastName])
 
-  const submitDecision = useCallback(async () => {
+  const submitDecision = useCallback(async (reactionMs: number) => {
     setStep('computing')
     const nextAttempts = attempts + 1
     setAttempts(nextAttempts)
@@ -363,12 +377,19 @@ export function AccessRequest() {
       return
     }
 
+    console.log('[ACCESS SIGNALS]', {
+      student_id: studentId,
+      vocal_score: vocalQualityRef.current,
+      behavioral_score: behavioralScore,
+      reaction_ms: reactionMs,
+    })
+
     try {
       const result = await sendAuthAccessSignals({
         student_id: studentId,
-        vocal_score: vocalQuality ?? 0,
+        vocal_score: vocalQualityRef.current,
         behavioral_score: behavioralScore,
-        reaction_ms: 0,
+        reaction_ms: reactionMs,
       })
       let d: Decision = result.decision as Decision
       if (d === 'REJECTED' && nextAttempts >= MAX_ATTEMPTS) {
@@ -394,15 +415,53 @@ export function AccessRequest() {
     }
     setStep('decision')
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempts, studentId, vocalQuality, behavioral, form])
+  }, [attempts, studentId, behavioral, form])
+
+  // ── Reflex handlers ──
+  useEffect(() => {
+    if (step !== 'reflex' || reflexState !== 'ready') return
+    const delay = 800 + Math.random() * 1200
+    const timer = setTimeout(() => { setReflexState('go'); setReflexT0(Date.now()) }, delay)
+    return () => clearTimeout(timer)
+  }, [step, reflexState, reflexRound])
+
+  function handleReflexTap() {
+    if (reflexState === 'wait') { setReflexState('ready'); return }
+    if (reflexState === 'ready') {
+      setReflexFeedback('Too early!')
+      setTimeout(() => setReflexFeedback(null), 600)
+      return
+    }
+    if (reflexState === 'go') {
+      const ms = Date.now() - reflexT0
+      const next = [...reflexTimes, ms]
+      setReflexTimes(next)
+      setReflexFeedback(`${ms}ms`)
+      setTimeout(() => {
+        setReflexFeedback(null)
+        if (reflexRound + 1 >= REFLEX_ROUNDS) {
+          const avg = Math.round(next.reduce((a, b) => a + b, 0) / next.length)
+          submitDecision(avg)
+        } else {
+          setReflexRound(r => r + 1)
+          setReflexState('ready')
+        }
+      }, 500)
+    }
+  }
 
   const retry = useCallback(() => {
     setDecision(null)
     setErr('')
     setVocalQuality(null)
+    vocalQualityRef.current = 0
     setVocalError('')
     setVocalPhase('idle')
     vocalEmbeddingRef.current = null
+    setReflexRound(0)
+    setReflexState('wait')
+    setReflexTimes([])
+    setReflexFeedback(null)
     void behavioral.start()
     setStep('selfie')
   }, [behavioral])
@@ -412,9 +471,14 @@ export function AccessRequest() {
     setErr('')
     setAttempts(0)
     setVocalQuality(null)
+    vocalQualityRef.current = 0
     setVocalError('')
     setVocalPhase('idle')
     vocalEmbeddingRef.current = null
+    setReflexRound(0)
+    setReflexState('wait')
+    setReflexTimes([])
+    setReflexFeedback(null)
     setStudentId(null)
     setStep('method')
   }, [])
@@ -425,8 +489,9 @@ export function AccessRequest() {
       case 'qr':           return 10
       case 'manual':       return 10
       case 'not-enrolled': return 0
-      case 'selfie':       return 35
-      case 'vocal':        return 65
+      case 'selfie':       return 30
+      case 'vocal':        return 50
+      case 'reflex':       return 70
       case 'computing':    return 90
       case 'decision':     return 100
     }
@@ -501,7 +566,7 @@ export function AccessRequest() {
 
       {step === 'selfie' && (
         <>
-          <div className="badge badge-cyan">Step 2 of 3 — Live photo</div>
+          <div className="badge badge-cyan">Step 2 of 4 — Live photo</div>
           <h1 className="step-title">Face Verification</h1>
           <p className="step-sub">
             Center your face in the frame and capture.
@@ -522,7 +587,7 @@ export function AccessRequest() {
 
       {step === 'vocal' && (
         <>
-          <div className="badge badge-cyan">Step 3 of 3 — Voice sample</div>
+          <div className="badge badge-cyan">Step 3 of 4 — Voice sample</div>
           <h1 className="step-title">Voice Verification</h1>
           <p className="step-sub">
             Read this sentence aloud when recording starts:
@@ -557,28 +622,13 @@ export function AccessRequest() {
           )}
 
           {vocalPhase === 'recording' && (
-            <div className="card" style={{ textAlign: 'center', padding: '20px 12px' }}>
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
               <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
                 Recording...
               </p>
               <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--cyan, #06b6d4)' }}>
-                {(voice.countdownMs / 1000).toFixed(1)}s
+                3s
               </p>
-              {voice.waveform && (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, height: 40, marginTop: 12 }}>
-                  {Array.from({ length: 24 }, (_, i) => {
-                    const idx = Math.floor((i / 24) * voice.waveform!.length)
-                    const v = Math.abs((voice.waveform![idx] - 128) / 128)
-                    return (
-                      <div key={i} style={{
-                        width: 3, borderRadius: 2, transition: 'height 0.08s',
-                        height: Math.max(4, v * 36),
-                        background: 'var(--cyan, #06b6d4)', opacity: 0.7 + v * 0.3,
-                      }} />
-                    )
-                  })}
-                </div>
-              )}
             </div>
           )}
 
@@ -597,6 +647,35 @@ export function AccessRequest() {
                 Done ✓
               </p>
             </div>
+          )}
+        </>
+      )}
+
+      {step === 'reflex' && (
+        <>
+          <div className="badge badge-amber">Step 4 of 4 — Reflex</div>
+          <h1 className="step-title">Reflex Test</h1>
+          <p className="step-sub">
+            Tap immediately when the button turns <b style={{ color: 'var(--green, #22c55e)' }}>GREEN</b>.
+            {' '}{Math.min(reflexRound + 1, REFLEX_ROUNDS)}/{REFLEX_ROUNDS}
+          </p>
+          <button
+            onClick={handleReflexTap}
+            style={{
+              width: '100%', height: 140, borderRadius: 16,
+              background: reflexState === 'go' ? 'var(--green, #22c55e)' : 'var(--bg3, #1a2236)',
+              border: `2px solid ${reflexState === 'go' ? 'var(--green, #22c55e)' : 'var(--border, #333)'}`,
+              color: reflexState === 'go' ? '#fff' : 'var(--grey)',
+              fontSize: reflexFeedback ? 32 : 18, fontWeight: 800,
+              cursor: 'pointer', transition: 'all 0.1s', letterSpacing: 2,
+            }}
+          >
+            {reflexFeedback || (reflexState === 'go' ? 'TAP NOW!' : reflexState === 'ready' ? 'WAIT...' : 'TAP TO START')}
+          </button>
+          {reflexTimes.length > 0 && (
+            <p style={{ marginTop: 14, fontSize: 13, color: 'var(--grey)' }}>
+              Avg: {Math.round(reflexTimes.reduce((a, b) => a + b, 0) / reflexTimes.length)}ms
+            </p>
           )}
         </>
       )}
