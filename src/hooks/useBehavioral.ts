@@ -146,6 +146,22 @@ async function requestPermissionIfNeeded(
   }
 }
 
+/**
+ * iOS 13+: DeviceMotionEvent.requestPermission MUST be called from a user gesture.
+ * Call this helper from the first button click of the flow, then start the hook.
+ */
+export async function requestMotionPermission(): Promise<boolean> {
+  if (typeof DeviceMotionEvent === 'undefined') return false
+  const dm = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<'granted' | 'denied'> }
+  if (typeof dm.requestPermission !== 'function') return true // Android / desktop
+  try {
+    const result = await dm.requestPermission()
+    return result === 'granted'
+  } catch {
+    return false
+  }
+}
+
 export function useBehavioral(): BehavioralController {
   const [isCapturing, setIsCapturing] = useState(false)
 

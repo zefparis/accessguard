@@ -1,17 +1,25 @@
+type Listener = (data: unknown) => void
+
 class SignalBus {
-  private readonly buffers = new Map<string, unknown[]>()
+  private readonly listeners = new Map<string, Set<Listener>>()
   private paused = false
 
-  constructor() {
-    window.setInterval(() => {
-      this.flushAll()
-    }, 1000)
+  emit(channel: string, data: unknown): void {
+    if (this.paused) return
+    const subs = this.listeners.get(channel)
+    if (subs) {
+      for (const fn of subs) {
+        try { fn(data) } catch { /* swallow */ }
+      }
+    }
   }
 
-  emit(channel: string, data: unknown): void {
-    const current = this.buffers.get(channel) ?? []
-    current.push(data)
-    this.buffers.set(channel, current)
+  subscribe(channel: string, fn: Listener): () => void {
+    if (!this.listeners.has(channel)) {
+      this.listeners.set(channel, new Set())
+    }
+    this.listeners.get(channel)!.add(fn)
+    return () => { this.listeners.get(channel)?.delete(fn) }
   }
 
   pause(): void {
@@ -20,36 +28,6 @@ class SignalBus {
 
   resume(): void {
     this.paused = false
-  }
-
-  private flushAll(): void {
-    if (this.paused) {
-      return
-    }
-
-    for (const [channel, buffer] of this.buffers.entries()) {
-      if (buffer.length === 0) {
-        continue
-      }
-
-      const batch = [...buffer]
-      this.buffers.set(channel, [])
-      this.sendToBackend(channel, batch)
-    }
-  }
-
-  private sendToBackend(channel: string, batch: unknown[]): void {
-    void fetch('/api/signals', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        channel,
-        batch,
-        source: 'accessguard',
-      }),
-    }).catch(() => {})
   }
 }
 

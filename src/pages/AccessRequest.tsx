@@ -1,13 +1,38 @@
-import { memo, useCallback, useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { QRScanner, type AccessQrPayload } from '../components/QRScanner'
-import { verifyWorker } from '../services/api'
+import { ReactionTime } from '../components/ReactionTime'
+import {
+  lookupEnrollment,
+  sendAuthAccessSignals,
+  verifyWorker,
+  vocalVerify,
+} from '../services/api'
 import { addAccessLogEntry } from '../services/accessLog'
 import { useAccessGuardStore } from '../store/accessguardStore'
-import { behavioralCollector, cognitiveCollector, faceCollector, signalBus } from '../signal-engine'
+import { useVoiceBiometrics } from '../hooks/useVoiceBiometrics'
+import {
+  useBehavioral,
+  requestMotionPermission,
+  type BehavioralProfile,
+} from '../hooks/useBehavioral'
 
-type Step = 'method' | 'qr' | 'manual' | 'selfie' | 'verifying' | 'result'
+const MAX_ATTEMPTS = 3
+const VOCAL_RECORD_MS = 3000
+
+type Step =
+  | 'method'
+  | 'qr'
+  | 'manual'
+  | 'not-enrolled'
+  | 'selfie'
+  | 'vocal'
+  | 'reaction'
+  | 'computing'
+  | 'decision'
+
+type Decision = 'APPROVED' | 'REVIEW' | 'REJECTED' | 'MANUAL_REVIEW'
 
 type AccessForm = {
   firstName: string
@@ -17,9 +42,66 @@ type AccessForm = {
   access_point: string
 }
 
+const sigmoid = (v: number, mid: number) =>
+  1 / (1 + Math.exp(-3 * (v - mid) / mid))
+
+function behavioralScoreFromProfile(p: BehavioralProfile): number {
+  const scores: number[] = []
+
+  const gyroStd = p.motion.rotation_rate?.mag_std
+  if (gyroStd !== undefined && gyroStd > 0) {
+    scores.push(sigmoid(gyroStd, 1.0))
+  }
+
+  const accelStd = p.motion.accel_gravity?.mag_std
+  if (accelStd !== undefined && accelStd > 0) {
+    scores.push(sigmoid(accelStd, 10.0))
+  }
+
+  const tapInterMean = p.touch.inter_tap_ms_mean
+  const tapDurMean = p.touch.tap_duration_ms_mean
+  if (tapInterMean > 0 && tapDurMean > 0) {
+    const tapCV = tapInterMean / Math.max(1, tapDurMean)
+    scores.push(sigmoid(tapCV, 2.0))
+  }
+
+  if (scores.length === 0) {
+    return p.device.touch_capable ? 0.4 : 0.2
+  }
+
+  return scores.reduce((a, b) => a + b, 0) / scores.length
+}
+
+const COPY: Record<Decision, { title: string; sub: string }> = {
+  APPROVED: {
+    title: 'Access Granted',
+    sub: 'You may proceed. Valid for 8 hours.',
+  },
+  REVIEW: {
+    title: 'Pending Verification',
+    sub: 'A security agent will validate this request shortly.',
+  },
+  REJECTED: {
+    title: 'Access Denied',
+    sub: 'Verification failed — please try again or contact security.',
+  },
+  MANUAL_REVIEW: {
+    title: 'Sent for Manual Review',
+    sub: 'A security agent will contact you to complete authentication.',
+  },
+}
+
+const TONE: Record<Decision, { color: string; bg: string; border: string; glyph: string }> = {
+  APPROVED:      { color: '#16a34a', bg: 'rgba(34,197,94,0.10)',  border: 'rgba(34,197,94,0.45)',  glyph: '✔' },
+  REVIEW:        { color: '#f59e0b', bg: 'rgba(245,158,11,0.10)', border: 'rgba(245,158,11,0.45)', glyph: '!' },
+  REJECTED:      { color: '#ef4444', bg: 'rgba(239,68,68,0.10)',  border: 'rgba(239,68,68,0.45)',  glyph: '×' },
+  MANUAL_REVIEW: { color: '#f59e0b', bg: 'rgba(245,158,11,0.10)', border: 'rgba(245,158,11,0.45)', glyph: '⏳' },
+}
+
 type ManualEntryFormProps = {
   err: string
   form: AccessForm
+  lookupBusy: boolean
   onSubmit: (e: FormEvent) => void
   onFirstNameChange: (e: ChangeEvent<HTMLInputElement>) => void
   onLastNameChange: (e: ChangeEvent<HTMLInputElement>) => void
@@ -31,6 +113,7 @@ type ManualEntryFormProps = {
 const ManualEntryForm = memo(function ManualEntryForm({
   err,
   form,
+  lookupBusy,
   onSubmit,
   onFirstNameChange,
   onLastNameChange,
@@ -40,7 +123,7 @@ const ManualEntryForm = memo(function ManualEntryForm({
 }: ManualEntryFormProps) {
   return (
     <>
-      <div className="badge badge-cyan">Step 1 — Manual</div>
+      <div className="badge badge-cyan">Step 1 — Identity</div>
       <h1 className="step-title">Manual Entry</h1>
       <p className="step-sub">Enter name and site/zone.</p>
       <form onSubmit={onSubmit} style={{ width: '100%' }}>
@@ -63,7 +146,9 @@ const ManualEntryForm = memo(function ManualEntryForm({
           <input value={form.access_point} onChange={onAccessPointChange} placeholder="Gate 3" />
         </div>
         {err && <div style={{ color: 'var(--red)', fontSize: 13, marginBottom: 10 }}>{err}</div>}
-        <button className="btn btn-primary" type="submit">Continue →</button>
+        <button className="btn btn-primary" type="submit" disabled={lookupBusy}>
+          {lookupBusy ? 'Looking up...' : 'Continue →'}
+        </button>
       </form>
       <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={onBack}>Back</button>
     </>
@@ -74,29 +159,25 @@ export function AccessRequest() {
   const nav = useNavigate()
   const { worker } = useAccessGuardStore()
 
-  useEffect(() => {
-    behavioralCollector.start()
-
-    return () => {
-      behavioralCollector.stop()
-    }
-  }, [])
-
   const [step, setStep] = useState<Step>('method')
   const [err, setErr] = useState('')
-  const [selfieB64, setSelfieB64] = useState('')
+  const [studentId, setStudentId] = useState<string | null>(null)
+  const [vocalQuality, setVocalQuality] = useState<number | null>(null)
+  const [vocalError, setVocalError] = useState('')
+  const [lookupBusy, setLookupBusy] = useState(false)
+  const [attempts, setAttempts] = useState(0)
+  const [decision, setDecision] = useState<Decision | null>(null)
+
+  const voice = useVoiceBiometrics()
+  const behavioral = useBehavioral()
+  const vocalEmbeddingRef = useRef<Float32Array | null>(null)
 
   useEffect(() => {
-    if (step === 'selfie') {
-      signalBus.pause()
-
-      return () => {
-        signalBus.resume()
-      }
+    return () => {
+      try { behavioral.stop() } catch { /* already stopped */ }
     }
-
-    signalBus.resume()
-  }, [step])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const [form, setForm] = useState<AccessForm>({
     firstName: worker?.firstName ?? '',
@@ -105,8 +186,6 @@ export function AccessRequest() {
     zone: worker?.employerSite?.split(' — ')[1] ?? '',
     access_point: '',
   })
-
-  const accessLevel = worker?.jobRole || '—'
 
   const handleFirstNameChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     setForm(v => ({ ...v, firstName: e.target.value }))
@@ -137,10 +216,41 @@ export function AccessRequest() {
       zone: payload.zone,
       access_point: payload.access_point,
     }))
-    setStep('selfie')
+    // After QR, go to lookup
+    doLookup(form.firstName || worker?.firstName || '', form.lastName || worker?.lastName || '')
   }
 
-  const beginManual = useCallback((e: FormEvent) => {
+  async function doLookup(firstName: string, lastName: string) {
+    if (!firstName.trim() || !lastName.trim()) {
+      // No name yet → go to manual
+      setStep('manual')
+      return
+    }
+    setLookupBusy(true)
+    setErr('')
+    try {
+      await requestMotionPermission()
+    } catch { /* user denied or unsupported */ }
+    try {
+      const lookup = await lookupEnrollment({
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+      })
+      if (!lookup.found) {
+        setStep('not-enrolled')
+        return
+      }
+      if (lookup.student_id) setStudentId(lookup.student_id)
+      void behavioral.start()
+      setStep('selfie')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Profile lookup failed')
+    } finally {
+      setLookupBusy(false)
+    }
+  }
+
+  const beginManual = useCallback(async (e: FormEvent) => {
     e.preventDefault()
     setErr('')
     if (!form.firstName || !form.lastName) {
@@ -151,28 +261,97 @@ export function AccessRequest() {
       setErr('Please enter Site / Zone.')
       return
     }
-    setStep('selfie')
+    await doLookup(form.firstName, form.lastName)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.firstName, form.lastName, form.zone])
 
-  async function onSelfie(b64: string) {
-    faceCollector.capture(b64)
-    setSelfieB64(b64)
-    setStep('verifying')
+  const handleSelfie = useCallback(async (b64: string) => {
     setErr('')
-    const startedAt = performance.now()
+    try {
+      const res = await verifyWorker({
+        selfie_b64: b64,
+        first_name: form.firstName,
+        last_name: form.lastName,
+        student_id: studentId ?? undefined,
+      })
+      if (res.student_id) setStudentId(res.student_id)
+      setStep('vocal')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Face check failed')
+      setStep('method')
+    }
+  }, [form.firstName, form.lastName, studentId])
+
+  const handleVocal = useCallback(async () => {
+    setVocalError('')
+    let samples: Float32Array
+    try {
+      samples = await voice.recordAudio(VOCAL_RECORD_MS)
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      setVocalError(errMsg)
+      setVocalQuality(0)
+      setStep('reaction')
+      return
+    }
+
+    if (!samples || samples.length === 0) {
+      setVocalError('Microphone returned empty audio')
+      setVocalQuality(0)
+      setStep('reaction')
+      return
+    }
+
+    const embedding = voice.extractMFCC(samples, 16000)
+    vocalEmbeddingRef.current = embedding
 
     try {
-      const res = await verifyWorker({ selfie_b64: b64, first_name: form.firstName, last_name: form.lastName })
-      const similarity = Math.round(res.similarity)
-      const granted = Boolean(res.verified)
-      const durationMs = Math.round(performance.now() - startedAt)
-
-      cognitiveCollector.record({
-        testId: 'access-request',
-        score: similarity,
-        durationMs,
+      const resp = await vocalVerify({
+        first_name: form.firstName,
+        last_name: form.lastName,
+        vocal_embedding: Array.from(embedding),
       })
+      setVocalQuality(Math.max(0, Math.min(1, resp.vocal_score)))
+    } catch {
+      setVocalQuality(0)
+    }
 
+    setStep('reaction')
+  }, [voice, form.firstName, form.lastName])
+
+  const handleReactionDone = useCallback(async (avgMs: number) => {
+    setStep('computing')
+    const nextAttempts = attempts + 1
+    setAttempts(nextAttempts)
+
+    let behavioralScore = 0
+    try {
+      const profile = behavioral.stop()
+      behavioralScore = behavioralScoreFromProfile(profile)
+    } catch {
+      behavioralScore = 0
+    }
+
+    if (!studentId) {
+      // No enrollment session — fail safe to REVIEW (never APPROVED without backend)
+      setDecision('REVIEW')
+      setStep('decision')
+      return
+    }
+
+    try {
+      const result = await sendAuthAccessSignals({
+        student_id: studentId,
+        vocal_score: vocalQuality ?? 0,
+        behavioral_score: behavioralScore,
+        reaction_ms: avgMs,
+      })
+      let d: Decision = result.decision as Decision
+      if (d === 'REJECTED' && nextAttempts >= MAX_ATTEMPTS) {
+        d = 'MANUAL_REVIEW'
+      }
+
+      // Log locally
       addAccessLogEntry({
         at: Date.now(),
         first_name: form.firstName,
@@ -180,26 +359,60 @@ export function AccessRequest() {
         site: form.site || 'Unknown site',
         zone: form.zone || 'Unknown zone',
         access_point: form.access_point || '—',
-        granted,
-        similarity,
+        granted: d === 'APPROVED',
+        similarity: Math.round((result.detail?.facial ?? 0) * 100),
       })
 
-      setResult({ granted, similarity })
-      setStep('result')
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Verification failed')
-      setResult({ granted: false, similarity: 0 })
-      setStep('result')
+      setDecision(d)
+    } catch {
+      // Network failure → REVIEW (never APPROVED without backend)
+      setDecision('REVIEW')
     }
-  }
+    setStep('decision')
+  }, [attempts, studentId, vocalQuality, behavioral, form])
 
-  const [result, setResult] = useState<{ granted: boolean; similarity: number } | null>(null)
+  const retry = useCallback(() => {
+    setDecision(null)
+    setErr('')
+    setVocalQuality(null)
+    setVocalError('')
+    vocalEmbeddingRef.current = null
+    void behavioral.start()
+    setStep('selfie')
+  }, [behavioral])
 
-  const nowLabel = useMemo(() => new Date().toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', year: 'numeric', month: '2-digit', day: '2-digit' }), [step])
+  const restart = useCallback(() => {
+    setDecision(null)
+    setErr('')
+    setAttempts(0)
+    setVocalQuality(null)
+    setVocalError('')
+    vocalEmbeddingRef.current = null
+    setStudentId(null)
+    setStep('method')
+  }, [])
+
+  const progressPct = useMemo(() => {
+    switch (step) {
+      case 'method':       return 0
+      case 'qr':           return 10
+      case 'manual':       return 10
+      case 'not-enrolled': return 0
+      case 'selfie':       return 30
+      case 'vocal':        return 50
+      case 'reaction':     return 70
+      case 'computing':    return 90
+      case 'decision':     return 100
+    }
+  }, [step])
 
   return (
     <div className="page">
       <div className="logo" style={{ cursor: 'pointer' }} onClick={() => nav('/')}>← ACCESSGUARD</div>
+
+      <div className="progress-bar" style={{ width: '100%', maxWidth: 440 }}>
+        <div className="progress-fill" style={{ width: `${progressPct}%` }} />
+      </div>
 
       {step === 'method' && (
         <>
@@ -229,6 +442,7 @@ export function AccessRequest() {
         <ManualEntryForm
           err={err}
           form={form}
+          lookupBusy={lookupBusy}
           onSubmit={beginManual}
           onFirstNameChange={handleFirstNameChange}
           onLastNameChange={handleLastNameChange}
@@ -238,12 +452,35 @@ export function AccessRequest() {
         />
       )}
 
+      {step === 'not-enrolled' && (
+        <>
+          <div className="badge" style={{ background: 'rgba(239,68,68,0.12)', color: 'var(--red)', border: '1px solid rgba(239,68,68,0.25)', margin: '0 auto 16px' }}>
+            No profile found
+          </div>
+          <h1 className="step-title">
+            {form.firstName} {form.lastName} is not enrolled yet.
+          </h1>
+          <p className="step-sub">
+            Please complete enrolment first — we need a registered face and
+            voice profile to verify identity before granting access.
+          </p>
+          <button className="btn btn-primary" onClick={() => nav('/enroll')}>
+            Go to enrolment →
+          </button>
+          <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={() => setStep('method')}>
+            Try a different name
+          </button>
+        </>
+      )}
+
       {step === 'selfie' && (
         <>
-          <div className="badge badge-cyan">Step 2 — Selfie</div>
-          <h1 className="step-title">Identity Verification</h1>
-          <p className="step-sub">Look at the camera. This takes 2 seconds.</p>
-          <div className="card" style={{ width: '100%', padding: 14, marginTop: 0 }}>
+          <div className="badge badge-cyan">Step 2 of 4 — Live photo</div>
+          <h1 className="step-title">Face Verification</h1>
+          <p className="step-sub">
+            Center your face in the frame and capture.
+          </p>
+          <div className="card" style={{ width: '100%', padding: 14, marginTop: 0, marginBottom: 12 }}>
             <div className="metric-row">
               <span className="metric-label">Worker</span>
               <span className="metric-value">{form.firstName} {form.lastName}</span>
@@ -252,96 +489,165 @@ export function AccessRequest() {
               <span className="metric-label">Zone</span>
               <span className="metric-value">{zoneLabel}</span>
             </div>
-            <div className="metric-row">
-              <span className="metric-label">Access Level</span>
-              <span className="metric-value">{accessLevel}</span>
-            </div>
           </div>
-          <SelfieCapture onCapture={onSelfie} />
-          <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={() => setStep('method')}>Cancel</button>
+          <SelfieCapture onCapture={handleSelfie} />
         </>
       )}
 
-      {step === 'verifying' && (
+      {step === 'vocal' && (
         <>
-          <h1 className="step-title">Verifying…</h1>
-          <p className="step-sub">Matching your face against registered profile</p>
-          <div style={{ marginTop: 40, color: 'var(--accent)', fontSize: 48 }}>⬡</div>
+          <div className="badge badge-cyan">Step 3 of 4 — Voice sample</div>
+          <h1 className="step-title">Voice Verification</h1>
+          <p className="step-sub">
+            Hold the button and read this short sentence aloud for 3 seconds:
+            <br />
+            <em style={{ color: 'var(--ink, #fff)' }}>"I confirm my access request."</em>
+          </p>
+          {vocalError && (
+            <div className="card" style={{ color: 'var(--red)', fontSize: 13, marginBottom: 12 }}>
+              {vocalError} — continuing without voice.
+            </div>
+          )}
+          {voice.isRecording ? (
+            <div className="card" style={{ textAlign: 'center', padding: '20px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Recording...
+              </p>
+              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--cyan, #06b6d4)' }}>
+                {(voice.countdownMs / 1000).toFixed(1)}s
+              </p>
+            </div>
+          ) : (
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={handleVocal}
+              disabled={voice.isRecording}
+            >
+              Start voice sample →
+            </button>
+          )}
         </>
       )}
 
-      {step === 'result' && result && (
+      {step === 'reaction' && (
         <>
-          {result.granted ? (
-            <>
-              <div style={{ fontSize: 64, marginBottom: 12 }}>✅</div>
-              <div className="badge badge-green" style={{ margin: '0 auto 16px' }}>ACCESS GRANTED</div>
-              <h1 className="step-title">Welcome</h1>
-              <p className="step-sub">Valid for: 8 hours</p>
-            </>
-          ) : (
-            <>
-              <div style={{ fontSize: 64, marginBottom: 12 }}>❌</div>
-              <div className="badge" style={{ background:'rgba(239,68,68,0.12)', color:'var(--red)', border:'1px solid rgba(239,68,68,0.25)', margin:'0 auto 16px' }}>
-                ACCESS DENIED
-              </div>
-              <h1 className="step-title">Denied</h1>
-              <p className="step-sub">Face match failed — similarity: {result.similarity}%</p>
-            </>
-          )}
-
-          {err && <p className="step-sub" style={{ color: 'var(--red)' }}>{err}</p>}
-
-          <div className="card" style={{ width: '100%', marginTop: 10 }}>
-            <div className="metric-row">
-              <span className="metric-label">Worker</span>
-              <span className="metric-value">{form.firstName} {form.lastName}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Access Level</span>
-              <span className="metric-value">{accessLevel}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Site</span>
-              <span className="metric-value">{form.site || '—'}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Zone</span>
-              <span className="metric-value">{form.zone || '—'}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Access point</span>
-              <span className="metric-value">{form.access_point || '—'}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Time</span>
-              <span className="metric-value">{nowLabel}</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Match</span>
-              <span className="metric-value" style={{ color: result.granted ? 'var(--green)' : 'var(--red)' }}>{result.similarity}%</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Post-quantum</span>
-              <span className="metric-value">ML-KEM-768 ✓</span>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', gap: 12, width: '100%', marginTop: 16 }}>
-            <button className="btn btn-outline" onClick={() => { setStep('method'); setErr(''); setSelfieB64('') }}>New Request</button>
-            <button className="btn btn-outline" onClick={() => nav('/log')}>View Log →</button>
-          </div>
-
-          {result.granted ? (
-            <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={() => nav('/')}>Done</button>
-          ) : (
-            <button className="btn btn-outline" style={{ marginTop: 12 }} onClick={() => setStep('selfie')}>Try Again</button>
-          )}
-
-          {/* keep selfie in memory for potential future audit (not stored) */}
-          <div style={{ display: 'none' }}>{selfieB64.length}</div>
+          <div className="badge badge-cyan">Step 4 of 4 — Quick tap test</div>
+          <h1 className="step-title">Reaction Time</h1>
+          <p className="step-sub">
+            Tap the button as fast as you can when it turns yellow. 5 short rounds.
+          </p>
+          <ReactionTime onComplete={handleReactionDone} />
         </>
       )}
+
+      {step === 'computing' && (
+        <>
+          <h1 className="step-title">Computing decision...</h1>
+          <div style={{ marginTop: 40, color: 'var(--cyan)', fontSize: 48 }}>⬡</div>
+        </>
+      )}
+
+      {step === 'decision' && decision && (
+        <DecisionCard
+          decision={decision}
+          attempts={attempts}
+          form={form}
+          onRetry={retry}
+          onRestart={restart}
+          onViewLog={() => nav('/log')}
+        />
+      )}
+    </div>
+  )
+}
+
+interface DecisionCardProps {
+  decision: Decision
+  attempts: number
+  form: AccessForm
+  onRetry: () => void
+  onRestart: () => void
+  onViewLog: () => void
+}
+
+function DecisionCard({ decision, attempts, form, onRetry, onRestart, onViewLog }: DecisionCardProps) {
+  const tone = TONE[decision]
+  const copy = COPY[decision]
+  const canRetry = decision === 'REJECTED' && attempts < MAX_ATTEMPTS
+  const nowLabel = new Date().toLocaleString('en-ZA', { hour: '2-digit', minute: '2-digit', year: 'numeric', month: '2-digit', day: '2-digit' })
+
+  return (
+    <div style={{ display: 'grid', gap: 16, width: '100%' }}>
+      <div style={{
+        borderRadius: 16,
+        border: `1px solid ${tone.border}`,
+        background: tone.bg,
+        padding: '24px 20px',
+        textAlign: 'center',
+      }}>
+        <div style={{
+          width: 64, height: 64, borderRadius: '50%',
+          background: tone.color, color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 36, fontWeight: 800, margin: '0 auto 12px',
+        }}>
+          {tone.glyph}
+        </div>
+        <div style={{
+          fontSize: 11, fontWeight: 800, letterSpacing: '0.18em',
+          textTransform: 'uppercase', color: tone.color, marginBottom: 8,
+        }}>
+          {decision.replace('_', ' ')}
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: '#fff', marginBottom: 4 }}>
+          {copy.title}
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--grey)', lineHeight: 1.6 }}>
+          {copy.sub}
+        </div>
+      </div>
+
+      {decision === 'APPROVED' && (
+        <div className="card" style={{ width: '100%' }}>
+          <div className="metric-row">
+            <span className="metric-label">Worker</span>
+            <span className="metric-value">{form.firstName} {form.lastName}</span>
+          </div>
+          <div className="metric-row">
+            <span className="metric-label">Site</span>
+            <span className="metric-value">{form.site || '—'}</span>
+          </div>
+          <div className="metric-row">
+            <span className="metric-label">Zone</span>
+            <span className="metric-value">{form.zone || '—'}</span>
+          </div>
+          <div className="metric-row">
+            <span className="metric-label">Access point</span>
+            <span className="metric-value">{form.access_point || '—'}</span>
+          </div>
+          <div className="metric-row">
+            <span className="metric-label">Time</span>
+            <span className="metric-value">{nowLabel}</span>
+          </div>
+          <div className="metric-row">
+            <span className="metric-label">Post-quantum</span>
+            <span className="metric-value">ML-KEM-768 ✓</span>
+          </div>
+        </div>
+      )}
+
+      {canRetry && (
+        <button className="btn btn-primary" onClick={onRetry}>
+          Try again
+        </button>
+      )}
+      <button className="btn btn-outline" onClick={onViewLog}>
+        View Access Log →
+      </button>
+      <button className="btn btn-outline" onClick={onRestart}>
+        New Request
+      </button>
     </div>
   )
 }
