@@ -201,12 +201,14 @@ export function Enroll() {
 
   function handleSelfie(b64: string) {
     faceCollector.capture(b64)
-    setSelfieB64(b64)
+    // Strip data URL prefix — backend expects raw base64
+    const raw = b64.replace(/^data:image\/[a-z]+;base64,/, '')
+    setSelfieB64(raw)
     setTimeout(() => setStep('stroop'), 600)
   }
 
   function handleStroop(score: number) {
-    setCog(c => ({ ...c, stroopScore: score }))
+    setCog(c => ({ ...c, stroopScore: score, stroopAccuracy: score / 100 }))
     setStep('vocal')
   }
 
@@ -345,6 +347,17 @@ export function Enroll() {
         pq_signature,
         pq_algorithm: PQ_ALGORITHM,
       }
+
+      console.log('[ENROLL PAYLOAD]', {
+        stroopScore: final.stroopScore,
+        stroopAccuracy: final.stroopAccuracy,
+        reflexAvgMs: final.reflexAvgMs,
+        reflexScores: final.reflexScores,
+        vocalQuality: final.vocalQuality,
+        hasEmbedding: !!(final.vocalEmbedding && final.vocalEmbedding.length > 0),
+        selfieB64Length: selfieB64.length,
+        selfieB64Prefix: selfieB64.substring(0, 30),
+      })
 
       const res = await enrollWorker({
         selfie_b64: selfieB64,
