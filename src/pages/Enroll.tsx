@@ -2,22 +2,26 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { StroopTest } from '../components/StroopTest'
-import { NeuralReflex } from '../components/NeuralReflex'
-import { VocalImprint } from '../components/VocalImprint'
 import { ReactionTime } from '../components/ReactionTime'
 import { BehavioralCapture } from '../components/BehavioralCapture'
 import type { BehavioralController, BehavioralProfile } from '../hooks/useBehavioral'
+import { useVoiceBiometrics } from '../hooks/useVoiceBiometrics'
 import { useAccessGuardStore } from '../store/accessguardStore'
-import { enrollWorker } from '../services/api'
+import { enrollWorker, vocalVerify } from '../services/api'
 import { generateSessionKeypair, PQ_ALGORITHM, signProfile } from '../services/postQuantum'
 import { behavioralCollector, faceCollector, signalBus } from '../signal-engine'
 import type { CognitiveBaseline } from '../types'
 
-type Step = 'identity' | 'selfie' | 'stroop' | 'reflex' | 'vocal' | 'reaction' | 'submitting' | 'success' | 'error'
+type Step = 'identity' | 'selfie' | 'stroop' | 'vocal' | 'reaction' | 'submitting' | 'success' | 'error'
+
+type VocalPhase = 'idle' | 'countdown' | 'recording' | 'processing' | 'done'
 
 const PROGRESS: Record<Step, number> = {
-  identity:10, selfie:25, stroop:45, reflex:60, vocal:75, reaction:88, submitting:95, success:100, error:0
+  identity:10, selfie:25, stroop:45, vocal:65, reaction:85, submitting:95, success:100, error:0
 }
+
+const VOCAL_RECORD_MS = 3000
+const VOCAL_COUNTDOWN_SEC = 3
 
 type IdentityFormState = {
   firstName: string
@@ -54,7 +58,7 @@ const IdentityForm = memo(function IdentityForm({
 }: IdentityFormProps) {
   return (
     <>
-      <div className="badge badge-cyan">Step 1 of 6 — Identity</div>
+      <div className="badge badge-cyan">Step 1 of 5 — Identity</div>
       <h1 className="step-title">Access Registration</h1>
       <p className="step-sub">Create your physical access profile for secure sites.</p>
       <form onSubmit={onSubmit} style={{ width: '100%' }}>
@@ -119,6 +123,10 @@ export function Enroll() {
   const [errorMsg, setErrorMsg] = useState('')
   const [workerId, setWorkerId] = useState('')
   const [confidence, setConf] = useState(0)
+
+  const voice = useVoiceBiometrics()
+  const [vocalPhase, setVocalPhase] = useState<VocalPhase>('idle')
+  const [vocalCountdown, setVocalCountdown] = useState(VOCAL_COUNTDOWN_SEC)
 
   useEffect(() => {
     if (step === 'selfie') {
@@ -194,23 +202,61 @@ export function Enroll() {
 
   function handleStroop(score: number) {
     setCog(c => ({ ...c, stroopScore: score }))
-    setStep('reflex')
-  }
-
-  function handleReflex(ms: number) {
-    setCog(c => ({ ...c, reflexVelocityMs: ms }))
     setStep('vocal')
   }
 
-  function handleVocal(result: { embedding: number[]; quality: number; threshold: number }) {
-    // Store voice biometrics locally
+  async function handleVocal() {
+    setVocalPhase('countdown')
+    setVocalCountdown(VOCAL_COUNTDOWN_SEC)
+
+    for (let i = VOCAL_COUNTDOWN_SEC; i >= 1; i--) {
+      setVocalCountdown(i)
+      await new Promise(r => setTimeout(r, 1000))
+    }
+
+    setVocalPhase('recording')
+    let samples: Float32Array
+    try {
+      samples = await voice.recordAudio(VOCAL_RECORD_MS)
+    } catch (e) {
+      console.error('[vocal] recordAudio failed', e)
+      setCog(c => ({ ...c, vocalAccuracy: 0, vocalQuality: 0 }))
+      setVocalPhase('idle')
+      setStep('reaction')
+      return
+    }
+
+    if (!samples || samples.length === 0) {
+      setCog(c => ({ ...c, vocalAccuracy: 0, vocalQuality: 0 }))
+      setVocalPhase('idle')
+      setStep('reaction')
+      return
+    }
+
+    setVocalPhase('processing')
+    const embedding = voice.extractMFCC(samples, 16000)
+
+    let quality = 0
+    try {
+      const resp = await vocalVerify({
+        first_name: form.firstName,
+        last_name: form.lastName,
+        vocal_embedding: Array.from(embedding),
+      })
+      quality = Math.max(0, Math.min(1, resp.vocal_score))
+    } catch { /* continue without voice */ }
+
     setCog(c => ({
       ...c,
-      vocalAccuracy: Math.round(result.quality * 100),
-      vocalEmbedding: result.embedding,
-      vocalQuality: result.quality,
-      vocalSimilarityThreshold: result.threshold,
+      vocalAccuracy: Math.round(quality * 100),
+      vocalEmbedding: Array.from(embedding),
+      vocalQuality: quality,
+      vocalSimilarityThreshold: 0.75,
     }))
+
+    setVocalPhase('done')
+    await new Promise(r => setTimeout(r, 800))
+    setVocalPhase('idle')
     setStep('reaction')
   }
 
@@ -221,7 +267,7 @@ export function Enroll() {
   async function handleReaction(ms: number) {
     const final: CognitiveBaseline = {
       stroopScore: cognitive.stroopScore ?? 0,
-      reflexVelocityMs: cognitive.reflexVelocityMs ?? 0,
+      reflexVelocityMs: ms,
       vocalAccuracy: cognitive.vocalAccuracy ?? 0,
       vocalEmbedding: cognitive.vocalEmbedding,
       vocalQuality: cognitive.vocalQuality,
@@ -322,7 +368,7 @@ export function Enroll() {
 
         {step === 'selfie' && (
         <>
-          <div className="badge badge-cyan">Step 2 of 6 — Biometric</div>
+          <div className="badge badge-cyan">Step 2 of 5 — Biometric</div>
           <h1 className="step-title">Face Registration</h1>
           <p className="step-sub">Look directly at the camera. Ensure good lighting.</p>
           <SelfieCapture onCapture={handleSelfie} />
@@ -331,32 +377,89 @@ export function Enroll() {
 
         {step === 'stroop' && (
         <>
-          <div className="badge badge-amber">Step 3 of 6 — Cognitive</div>
+          <div className="badge badge-amber">Step 3 of 5 — Cognitive</div>
           <h1 className="step-title">Stroop Test</h1>
           <StroopTest onComplete={handleStroop} />
         </>
         )}
 
-        {step === 'reflex' && (
-        <>
-          <div className="badge badge-amber">Step 4 of 6 — Cognitive</div>
-          <h1 className="step-title">Neural Reflex</h1>
-          <NeuralReflex onComplete={handleReflex} />
-        </>
-        )}
-
         {step === 'vocal' && (
         <>
-          <div className="badge badge-amber">Step 5 of 6 — Cognitive</div>
+          <div className="badge badge-amber">Step 4 of 5 — Voice sample</div>
           <h1 className="step-title">Vocal Imprint</h1>
-          <VocalImprint onComplete={handleVocal} />
+          <p className="step-sub">
+            Read this sentence aloud when recording starts:
+            <br />
+            <em style={{ color: 'var(--ink, #fff)' }}>"I confirm my access registration."</em>
+          </p>
+
+          {vocalPhase === 'idle' && (
+            <button className="btn btn-primary" type="button" onClick={handleVocal}>
+              Start voice sample →
+            </button>
+          )}
+
+          {vocalPhase === 'countdown' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Get ready...
+              </p>
+              <p style={{ fontSize: 56, fontWeight: 800, color: 'var(--cyan, #06b6d4)', lineHeight: 1 }}>
+                {vocalCountdown}
+              </p>
+            </div>
+          )}
+
+          {vocalPhase === 'recording' && (
+            <div className="card" style={{ textAlign: 'center', padding: '20px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Recording...
+              </p>
+              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--cyan, #06b6d4)' }}>
+                {(voice.countdownMs / 1000).toFixed(1)}s
+              </p>
+              {voice.waveform && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, height: 40, marginTop: 12 }}>
+                  {Array.from({ length: 24 }, (_, i) => {
+                    const idx = Math.floor((i / 24) * voice.waveform!.length)
+                    const v = Math.abs((voice.waveform![idx] - 128) / 128)
+                    return (
+                      <div key={i} style={{
+                        width: 3, borderRadius: 2, transition: 'height 0.08s',
+                        height: Math.max(4, v * 36),
+                        background: 'var(--cyan, #06b6d4)', opacity: 0.7 + v * 0.3,
+                      }} />
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {vocalPhase === 'processing' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Processing...
+              </p>
+              <div style={{ fontSize: 28, color: 'var(--cyan, #06b6d4)' }}>⬡</div>
+            </div>
+          )}
+
+          {vocalPhase === 'done' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--green, #22c55e)' }}>
+                Done ✓
+              </p>
+            </div>
+          )}
         </>
         )}
 
         {step === 'reaction' && (
         <>
-          <div className="badge badge-amber">Step 6 of 6 — Cognitive</div>
+          <div className="badge badge-amber">Step 5 of 5 — Quick tap test</div>
           <h1 className="step-title">Reaction Time</h1>
+          <p className="step-sub">Tap the button as fast as you can when it turns yellow. 5 short rounds.</p>
           <ReactionTime onComplete={handleReaction} />
         </>
         )}
@@ -411,10 +514,6 @@ export function Enroll() {
             <div className="metric-row">
               <span className="metric-label">Stroop score</span>
               <span className="metric-value">{cognitive.stroopScore}%</span>
-            </div>
-            <div className="metric-row">
-              <span className="metric-label">Reflex velocity</span>
-              <span className="metric-value">{cognitive.reflexVelocityMs}ms</span>
             </div>
             <div className="metric-row">
               <span className="metric-label">Reaction time</span>
