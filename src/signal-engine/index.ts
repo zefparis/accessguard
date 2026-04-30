@@ -1,5 +1,4 @@
 export { signalBus } from './SignalBus'
 export { behavioralCollector } from './BehavioralCollector'
-export { voiceCollector } from './VoiceCollector'
 export { cognitiveCollector } from './CognitiveCollector'
 export { faceCollector } from './FaceCollector'

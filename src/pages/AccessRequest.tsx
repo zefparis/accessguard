@@ -20,6 +20,7 @@ import {
 
 const MAX_ATTEMPTS = 3
 const VOCAL_RECORD_MS = 3000
+const VOCAL_COUNTDOWN_SEC = 3
 
 type Step =
   | 'method'
@@ -31,6 +32,8 @@ type Step =
   | 'reaction'
   | 'computing'
   | 'decision'
+
+type VocalPhase = 'idle' | 'countdown' | 'recording' | 'processing' | 'done'
 
 type Decision = 'APPROVED' | 'REVIEW' | 'REJECTED' | 'MANUAL_REVIEW'
 
@@ -164,6 +167,8 @@ export function AccessRequest() {
   const [studentId, setStudentId] = useState<string | null>(null)
   const [vocalQuality, setVocalQuality] = useState<number | null>(null)
   const [vocalError, setVocalError] = useState('')
+  const [vocalPhase, setVocalPhase] = useState<VocalPhase>('idle')
+  const [vocalCountdown, setVocalCountdown] = useState(VOCAL_COUNTDOWN_SEC)
   const [lookupBusy, setLookupBusy] = useState(false)
   const [attempts, setAttempts] = useState(0)
   const [decision, setDecision] = useState<Decision | null>(null)
@@ -284,24 +289,39 @@ export function AccessRequest() {
 
   const handleVocal = useCallback(async () => {
     setVocalError('')
+    setVocalPhase('countdown')
+    setVocalCountdown(VOCAL_COUNTDOWN_SEC)
+
+    // Visual countdown 3-2-1
+    for (let i = VOCAL_COUNTDOWN_SEC; i >= 1; i--) {
+      setVocalCountdown(i)
+      await new Promise(r => setTimeout(r, 1000))
+    }
+
+    setVocalPhase('recording')
     let samples: Float32Array
     try {
       samples = await voice.recordAudio(VOCAL_RECORD_MS)
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e)
+      console.error('[vocal] recordAudio failed', errMsg)
       setVocalError(errMsg)
       setVocalQuality(0)
+      setVocalPhase('idle')
       setStep('reaction')
       return
     }
 
     if (!samples || samples.length === 0) {
+      console.error('[vocal] recordAudio returned empty buffer')
       setVocalError('Microphone returned empty audio')
       setVocalQuality(0)
+      setVocalPhase('idle')
       setStep('reaction')
       return
     }
 
+    setVocalPhase('processing')
     const embedding = voice.extractMFCC(samples, 16000)
     vocalEmbeddingRef.current = embedding
 
@@ -311,11 +331,18 @@ export function AccessRequest() {
         last_name: form.lastName,
         vocal_embedding: Array.from(embedding),
       })
-      setVocalQuality(Math.max(0, Math.min(1, resp.vocal_score)))
-    } catch {
+      const score = Math.max(0, Math.min(1, resp.vocal_score))
+      setVocalQuality(score)
+      console.log('[vocal] verify result', { score, reason: resp.reason, samples: samples.length })
+    } catch (verifyErr) {
+      const errMsg = verifyErr instanceof Error ? verifyErr.message : String(verifyErr)
+      console.warn('[vocal-verify] failed', errMsg)
       setVocalQuality(0)
     }
 
+    setVocalPhase('done')
+    await new Promise(r => setTimeout(r, 800))
+    setVocalPhase('idle')
     setStep('reaction')
   }, [voice, form.firstName, form.lastName])
 
@@ -376,6 +403,7 @@ export function AccessRequest() {
     setErr('')
     setVocalQuality(null)
     setVocalError('')
+    setVocalPhase('idle')
     vocalEmbeddingRef.current = null
     void behavioral.start()
     setStep('selfie')
@@ -387,6 +415,7 @@ export function AccessRequest() {
     setAttempts(0)
     setVocalQuality(null)
     setVocalError('')
+    setVocalPhase('idle')
     vocalEmbeddingRef.current = null
     setStudentId(null)
     setStep('method')
@@ -499,7 +528,7 @@ export function AccessRequest() {
           <div className="badge badge-cyan">Step 3 of 4 — Voice sample</div>
           <h1 className="step-title">Voice Verification</h1>
           <p className="step-sub">
-            Hold the button and read this short sentence aloud for 3 seconds:
+            Read this sentence aloud when recording starts:
             <br />
             <em style={{ color: 'var(--ink, #fff)' }}>"I confirm my access request."</em>
           </p>
@@ -508,7 +537,29 @@ export function AccessRequest() {
               {vocalError} — continuing without voice.
             </div>
           )}
-          {voice.isRecording ? (
+
+          {vocalPhase === 'idle' && (
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={handleVocal}
+            >
+              Start voice sample →
+            </button>
+          )}
+
+          {vocalPhase === 'countdown' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Get ready...
+              </p>
+              <p style={{ fontSize: 56, fontWeight: 800, color: 'var(--cyan, #06b6d4)', lineHeight: 1 }}>
+                {vocalCountdown}
+              </p>
+            </div>
+          )}
+
+          {vocalPhase === 'recording' && (
             <div className="card" style={{ textAlign: 'center', padding: '20px 12px' }}>
               <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
                 Recording...
@@ -516,16 +567,39 @@ export function AccessRequest() {
               <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--cyan, #06b6d4)' }}>
                 {(voice.countdownMs / 1000).toFixed(1)}s
               </p>
+              {voice.waveform && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2, height: 40, marginTop: 12 }}>
+                  {Array.from({ length: 24 }, (_, i) => {
+                    const idx = Math.floor((i / 24) * voice.waveform!.length)
+                    const v = Math.abs((voice.waveform![idx] - 128) / 128)
+                    return (
+                      <div key={i} style={{
+                        width: 3, borderRadius: 2, transition: 'height 0.08s',
+                        height: Math.max(4, v * 36),
+                        background: 'var(--cyan, #06b6d4)', opacity: 0.7 + v * 0.3,
+                      }} />
+                    )
+                  })}
+                </div>
+              )}
             </div>
-          ) : (
-            <button
-              className="btn btn-primary"
-              type="button"
-              onClick={handleVocal}
-              disabled={voice.isRecording}
-            >
-              Start voice sample →
-            </button>
+          )}
+
+          {vocalPhase === 'processing' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 12, color: 'var(--grey)', letterSpacing: '0.14em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Processing...
+              </p>
+              <div style={{ fontSize: 28, color: 'var(--cyan, #06b6d4)' }}>⬡</div>
+            </div>
+          )}
+
+          {vocalPhase === 'done' && (
+            <div className="card" style={{ textAlign: 'center', padding: '28px 12px' }}>
+              <p style={{ fontSize: 28, fontWeight: 800, color: 'var(--green, #22c55e)' }}>
+                Done ✓
+              </p>
+            </div>
           )}
         </>
       )}
