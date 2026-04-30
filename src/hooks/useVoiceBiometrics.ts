@@ -138,36 +138,35 @@ function createMelFilterbank(
   return filters
 }
 
-// Naive magnitude spectrum using AnalyserNode’s FFT (works without external deps).
-// This is not as precise as an offline FFT implementation but is sufficient for
-// the lightweight embedding prototype.
-function spectrumFromFrame(frame: Float32Array, sampleRate: number, fftSize: number): Float32Array {
-  const ctx = new OfflineAudioContext(1, fftSize, sampleRate)
-  const buffer = ctx.createBuffer(1, fftSize, sampleRate)
-  buffer.getChannelData(0).set(frame)
-  const src = ctx.createBufferSource()
-  src.buffer = buffer
-  const analyser = ctx.createAnalyser()
-  analyser.fftSize = fftSize
-  src.connect(analyser)
-  analyser.connect(ctx.destination)
-  src.start()
-  // Render is async; but OfflineAudioContext render is required.
-  // We can’t await here in a sync function, so we approximate by returning
-  // time-domain energy. For MFCC we actually need spectrum, so we will compute
-  // a simple autocorrelation-based proxy: absolute value of DFT via direct sum.
+// Direct DFT magnitude spectrum — O(N^2) per frame but N is small (~512).
+// Pre-compute twiddle factors once per fftSize to avoid repeated cos/sin calls.
+const twiddleCache = new Map<number, { cos: Float64Array; sin: Float64Array }>()
+function getTwiddle(fftSize: number): { cos: Float64Array; sin: Float64Array } {
+  let t = twiddleCache.get(fftSize)
+  if (t) return t
+  const cos = new Float64Array(fftSize)
+  const sin = new Float64Array(fftSize)
+  for (let n = 0; n < fftSize; n += 1) {
+    cos[n] = Math.cos((2 * Math.PI * n) / fftSize)
+    sin[n] = Math.sin((2 * Math.PI * n) / fftSize)
+  }
+  t = { cos, sin }
+  twiddleCache.set(fftSize, t)
+  return t
+}
 
-  const numBins = Math.floor(fftSize / 2) + 1
+function spectrumFromFrame(frame: Float32Array, _sampleRate: number, fftSize: number): Float32Array {
+  const numBins = (fftSize >> 1) + 1
   const out = new Float32Array(numBins)
-  // Direct DFT magnitude (O(N^2)) but N is small (~512). This is acceptable for 2s audio.
+  const { cos: twCos, sin: twSin } = getTwiddle(fftSize)
   for (let k = 0; k < numBins; k += 1) {
     let re = 0
     let im = 0
-    const w = (2 * Math.PI * k) / fftSize
     for (let n = 0; n < fftSize; n += 1) {
       const x = frame[n]
-      re += x * Math.cos(w * n)
-      im -= x * Math.sin(w * n)
+      const idx = (k * n) % fftSize
+      re += x * twCos[idx]
+      im -= x * twSin[idx]
     }
     out[k] = Math.sqrt(re * re + im * im)
   }
@@ -176,47 +175,17 @@ function spectrumFromFrame(frame: Float32Array, sampleRate: number, fftSize: num
 
 export function useVoiceBiometrics(): UseVoiceBiometrics {
   const [isRecording, setIsRecording] = useState(false)
-  const [countdownMs, setCountdownMs] = useState(0)
-  const [waveform, setWaveform] = useState<Uint8Array | null>(null)
+  const [countdownMs] = useState(0)
+  const [waveform] = useState<Uint8Array | null>(null)
 
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const rafRef = useRef<number | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
-
-  const startWaveform = useCallback((stream: MediaStream) => {
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    const ctx = new AudioCtx()
-    const src = ctx.createMediaStreamSource(stream)
-    const analyser = ctx.createAnalyser()
-    analyser.fftSize = 1024
-    src.connect(analyser)
-    analyserRef.current = analyser
-
-    const data = new Uint8Array(analyser.frequencyBinCount)
-
-    const tick = () => {
-      analyser.getByteTimeDomainData(data)
-      setWaveform(new Uint8Array(data))
-      rafRef.current = requestAnimationFrame(tick)
-    }
-
-    rafRef.current = requestAnimationFrame(tick)
-  }, [])
-
-  const stopWaveform = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current)
-    rafRef.current = null
-    analyserRef.current = null
-    setWaveform(null)
-  }, [])
 
   const recordAudio = useCallback(async (durationMs: number) => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     streamRef.current = stream
 
-    startWaveform(stream)
+    // Skip waveform rAF loop — vocal UI doesn't display it
     setIsRecording(true)
-    setCountdownMs(durationMs)
 
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus'
@@ -228,12 +197,6 @@ export function useVoiceBiometrics(): UseVoiceBiometrics {
       if (e.data.size > 0) chunks.push(e.data)
     }
 
-    const countdownStart = performance.now()
-    const countdownTimer = window.setInterval(() => {
-      const elapsed = performance.now() - countdownStart
-      setCountdownMs(Math.max(0, durationMs - Math.floor(elapsed)))
-    }, 50)
-
     recorder.start()
     await new Promise<void>(resolve => setTimeout(resolve, durationMs))
     recorder.stop()
@@ -242,11 +205,7 @@ export function useVoiceBiometrics(): UseVoiceBiometrics {
       recorder.onstop = () => resolve(new Blob(chunks, { type: mimeType }))
     })
 
-    window.clearInterval(countdownTimer)
-
-    stopWaveform()
     setIsRecording(false)
-    setCountdownMs(0)
 
     stream.getTracks().forEach(t => t.stop())
     streamRef.current = null
@@ -259,9 +218,10 @@ export function useVoiceBiometrics(): UseVoiceBiometrics {
     // Standardize to 16kHz for consistent MFCC extraction
     const TARGET_SR = 16000
     return resampleLinear(mono, audioBuffer.sampleRate, TARGET_SR)
-  }, [startWaveform, stopWaveform])
+  }, [])
 
   const extractMFCC = useCallback((audioData: Float32Array, sampleRate: number): Float32Array => {
+    console.time('mfcc-extraction')
     // 25ms window, 10ms hop
     const winSize = Math.floor(sampleRate * 0.025)
     const hopSize = Math.floor(sampleRate * 0.01)
@@ -279,7 +239,10 @@ export function useVoiceBiometrics(): UseVoiceBiometrics {
       frames.push(frame)
     }
 
-    if (frames.length === 0) return new Float32Array(192)
+    if (frames.length === 0) {
+      console.timeEnd('mfcc-extraction')
+      return new Float32Array(192)
+    }
 
     // Mean-pool MFCCs over time to get a stable vector
     const mfccSum = new Float32Array(numMfcc)
@@ -318,6 +281,7 @@ export function useVoiceBiometrics(): UseVoiceBiometrics {
     norm = Math.sqrt(norm) || 1
     for (let i = 0; i < emb.length; i += 1) emb[i] /= norm
 
+    console.timeEnd('mfcc-extraction')
     return emb
   }, [])
 

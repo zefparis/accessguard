@@ -2,11 +2,15 @@ import { signalBus } from './SignalBus'
 
 class BehavioralCollector {
   private lastTouch = 0
+  private lastMouse = 0
 
   private readonly handleMouseMove = (event: MouseEvent) => {
+    const now = Date.now()
+    if (now - this.lastMouse < 100) return
+    this.lastMouse = now
     signalBus.emit('behavioral', {
       type: 'mousemove',
-      timestamp: Date.now(),
+      timestamp: now,
       x: event.clientX,
       y: event.clientY,
     })
