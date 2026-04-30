@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { useNavigate } from 'react-router-dom'
 import { SelfieCapture } from '../components/SelfieCapture'
 import { QRScanner, type AccessQrPayload } from '../components/QRScanner'
-import { ReactionTime } from '../components/ReactionTime'
 import {
   lookupEnrollment,
   sendAuthAccessSignals,
@@ -29,7 +28,6 @@ type Step =
   | 'not-enrolled'
   | 'selfie'
   | 'vocal'
-  | 'reaction'
   | 'computing'
   | 'decision'
 
@@ -308,7 +306,7 @@ export function AccessRequest() {
       setVocalError(errMsg)
       setVocalQuality(0)
       setVocalPhase('idle')
-      setStep('reaction')
+      submitDecision()
       return
     }
 
@@ -317,7 +315,7 @@ export function AccessRequest() {
       setVocalError('Microphone returned empty audio')
       setVocalQuality(0)
       setVocalPhase('idle')
-      setStep('reaction')
+      submitDecision()
       return
     }
 
@@ -343,10 +341,10 @@ export function AccessRequest() {
     setVocalPhase('done')
     await new Promise(r => setTimeout(r, 800))
     setVocalPhase('idle')
-    setStep('reaction')
+    submitDecision()
   }, [voice, form.firstName, form.lastName])
 
-  const handleReactionDone = useCallback(async (avgMs: number) => {
+  const submitDecision = useCallback(async () => {
     setStep('computing')
     const nextAttempts = attempts + 1
     setAttempts(nextAttempts)
@@ -360,7 +358,6 @@ export function AccessRequest() {
     }
 
     if (!studentId) {
-      // No enrollment session — fail safe to REVIEW (never APPROVED without backend)
       setDecision('REVIEW')
       setStep('decision')
       return
@@ -371,7 +368,7 @@ export function AccessRequest() {
         student_id: studentId,
         vocal_score: vocalQuality ?? 0,
         behavioral_score: behavioralScore,
-        reaction_ms: avgMs,
+        reaction_ms: 0,
       })
       let d: Decision = result.decision as Decision
       if (d === 'REJECTED' && nextAttempts >= MAX_ATTEMPTS) {
@@ -396,6 +393,7 @@ export function AccessRequest() {
       setDecision('REVIEW')
     }
     setStep('decision')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempts, studentId, vocalQuality, behavioral, form])
 
   const retry = useCallback(() => {
@@ -427,9 +425,8 @@ export function AccessRequest() {
       case 'qr':           return 10
       case 'manual':       return 10
       case 'not-enrolled': return 0
-      case 'selfie':       return 30
-      case 'vocal':        return 50
-      case 'reaction':     return 70
+      case 'selfie':       return 35
+      case 'vocal':        return 65
       case 'computing':    return 90
       case 'decision':     return 100
     }
@@ -504,7 +501,7 @@ export function AccessRequest() {
 
       {step === 'selfie' && (
         <>
-          <div className="badge badge-cyan">Step 2 of 4 — Live photo</div>
+          <div className="badge badge-cyan">Step 2 of 3 — Live photo</div>
           <h1 className="step-title">Face Verification</h1>
           <p className="step-sub">
             Center your face in the frame and capture.
@@ -525,7 +522,7 @@ export function AccessRequest() {
 
       {step === 'vocal' && (
         <>
-          <div className="badge badge-cyan">Step 3 of 4 — Voice sample</div>
+          <div className="badge badge-cyan">Step 3 of 3 — Voice sample</div>
           <h1 className="step-title">Voice Verification</h1>
           <p className="step-sub">
             Read this sentence aloud when recording starts:
@@ -601,17 +598,6 @@ export function AccessRequest() {
               </p>
             </div>
           )}
-        </>
-      )}
-
-      {step === 'reaction' && (
-        <>
-          <div className="badge badge-cyan">Step 4 of 4 — Quick tap test</div>
-          <h1 className="step-title">Reaction Time</h1>
-          <p className="step-sub">
-            Tap the button as fast as you can when it turns yellow. 5 short rounds.
-          </p>
-          <ReactionTime onComplete={handleReactionDone} />
         </>
       )}
 
