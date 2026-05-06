@@ -1,4 +1,4 @@
-const API = import.meta.env.VITE_API_URL || 'https://hybrid-vector-api.fly.dev'
+const API = import.meta.env.VITE_API_URL || 'https://hybrid-vector-api-m5xt.onrender.com'
 // Require explicit env config (no silent fallbacks in production)
 const TENANT = import.meta.env.VITE_TENANT_ID
 const API_KEY = import.meta.env.VITE_HV_API_KEY
